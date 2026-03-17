@@ -379,8 +379,17 @@ function handlePhase(phase) {
     renderInitiativeBar();
     checkMyTurn();
   } else if (phase === 'ended' || phase === 'lobby') {
+    // Hide initiative bar
+    ['init-bar-gm','init-bar-player'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) { el.innerHTML = ''; el.style.display = 'none'; }
+    });
+    // Reset initiative state
+    initiativeOrder = [];
+    currentTurnIndex = 0;
+    lastTurnName = '';
     // Lock combat tabs - redirect to lobby/setup
-    const isInCombat = document.querySelector('.dpnl.active')?.id === 'dp-combat' || 
+    const isInCombat = document.querySelector('.dpnl.active')?.id === 'dp-combat' ||
                        document.querySelector('.ppnl.active')?.id === 'pp-combat';
     if (isInCombat) {
       if (ME.role === 'gm') showDMTab('setup');
@@ -395,8 +404,8 @@ function handlePhase(phase) {
 }
 
 function showCombatPopup() {
-  const popup = document.getElementById('combat-popup');
-  if (popup) { popup.classList.add('show'); sound('turn'); }
+  sound('turn');
+  window.joinCombat(); // shows pre-combat update popup
 }
 
 // ═══════════════════════════════════
@@ -469,16 +478,28 @@ window.loadPreset = function(k) {
 // ═══════════════════════════════════
 // PLAYER — CHARACTER SETUP
 // ═══════════════════════════════════
+window.updateDexMod = function() {
+  const dex = parseInt(document.getElementById('p-dex')?.value) || 10;
+  const mod = Math.floor((dex - 10) / 2);
+  const disp = document.getElementById('dex-mod-display');
+  if (disp) disp.textContent = 'Modificateur initiative: ' + (mod >= 0 ? '+' : '') + mod;
+};
+
 window.saveMyChar = async function() {
-  const ca   = parseInt(document.getElementById('p-ca').value) || 10;
-  const pv   = parseInt(document.getElementById('p-pv').value) || 20;
-  const init = parseInt(document.getElementById('p-init').value) || 0;
-  const cls  = document.getElementById('p-class').value.trim() || 'Aventurier';
-  const atk  = parseInt(document.getElementById('p-atk').value) || 3;
+  const ca  = parseInt(document.getElementById('p-ca').value) || 10;
+  const pv  = parseInt(document.getElementById('p-pv').value) || 20;
+  const dex = parseInt(document.getElementById('p-dex').value) || 10;
+  const cls = document.getElementById('p-class').value.trim() || 'Aventurier';
+  const initMod = Math.floor((dex - 10) / 2);
+
+  // Check if character already exists to preserve stats and current HP
+  const existing = await get(ref(db, `campaigns/${ME.campaignId}/members/${ME.username}`)).then(s => s.val());
+  const existingStats = existing?.stats || { hits:0, misses:0, crits:0, kills:0, totalDmg:0, totalDmgTaken:0, bestHit:0 };
+
   await set(ref(db, `campaigns/${ME.campaignId}/members/${ME.username}`), {
-    username: ME.username, ca, pvMax: pv, pvCur: pv, init, class: cls, atkBonus: atk,
-    online: true, ready: true, dead: false, statusEffects: [], type: 'ally', initiative: 0,
-    stats: { hits: 0, misses: 0, crits: 0, kills: 0, totalDmg: 0, totalDmgTaken: 0, bestHit: 0 }
+    username: ME.username, ca, pvMax: pv, pvCur: pv, dex, init: initMod,
+    class: cls, online: true, ready: true, dead: false,
+    statusEffects: [], type: 'ally', initiative: 0, stats: existingStats
   });
   toast('Personnage sauvegarde !');
   document.getElementById('saved-badge').style.display = 'block';
@@ -552,10 +573,17 @@ function showDiceAnimation(callback) {
 // INITIATIVE ORDER
 // ═══════════════════════════════════
 function renderInitiativeBar() {
+  const phase = CAMPAIGN.meta?.phase;
   const order = initiativeOrder;
-  if (!order.length) return;
+  // Hide bar completely when not in active combat
   ['init-bar-gm','init-bar-player'].forEach(id => {
     const el = document.getElementById(id); if (!el) return;
+    if (phase !== 'combat' || !order.length) {
+      el.innerHTML = '';
+      el.style.display = 'none';
+      return;
+    }
+    el.style.display = 'flex';
     el.innerHTML = order.map((c, i) => {
       const isCurrent = i === currentTurnIndex;
       const isDead = isCombatantDead(c.id, c.isEnemy);
@@ -1585,10 +1613,10 @@ button:disabled{opacity:.4;cursor:not-allowed}
           <div class="f"><label>Classe</label><input id="p-class" placeholder="Guerrier, Rodeur..."/></div>
           <div class="f"><label>Classe d'armure</label><input id="p-ca" type="number" value="12"/></div>
           <div class="f"><label>PV max</label><input id="p-pv" type="number" value="20"/></div>
-          <div class="f"><label>Bonus initiative</label><input id="p-init" type="number" value="0"/></div>
-          <div class="f"><label>Bonus attaque</label><input id="p-atk" type="number" value="3"/></div>
+          <div class="f"><label>DEX (score entier, ex: 14)</label><input id="p-dex" type="number" value="10" min="1" max="30" oninput="updateDexMod()"/></div>
+          
         </div>
-        <button class="btn btn-gold" onclick="saveMyChar()" style="width:100%">SAUVEGARDER</button>
+        <div id="dex-mod-display" style="font-size:10px;color:var(--dim);text-align:center;margin-bottom:8px">Modificateur initiative: +0</div><button class="btn btn-gold" onclick="saveMyChar()" style="width:100%">SAUVEGARDER</button>
         <div id="saved-badge">✓ PERSONNAGE PRET</div>
       </div>
     </div>
@@ -1674,12 +1702,26 @@ button:disabled{opacity:.4;cursor:not-allowed}
 
 <!-- COMBAT POPUP -->
 <div id="combat-popup">
-  <div class="popbox">
+  <div class="popbox" style="max-width:420px">
     <div class="poptitle">COMBAT LANCE !</div>
-    <div class="popsub">Le GM a demarre le combat.<br>Rejoins pour combattre !</div>
+    <div class="popsub">Verifie tes stats avant d'entrer.</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:16px 0;text-align:left">
+      <div class="f" style="margin:0">
+        <label style="font-size:9px;letter-spacing:2px;color:var(--dim);display:block;margin-bottom:4px">PV ACTUELS</label>
+        <input id="popup-pv" type="number" min="0" placeholder="ex: 18"
+          style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:18px;text-align:center;padding:8px;border-radius:3px;outline:none"/>
+      </div>
+      <div class="f" style="margin:0">
+        <label style="font-size:9px;letter-spacing:2px;color:var(--dim);display:block;margin-bottom:4px">CLASSE D'ARMURE</label>
+        <input id="popup-ca" type="number" min="1" placeholder="ex: 15"
+          style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:18px;text-align:center;padding:8px;border-radius:3px;outline:none"/>
+      </div>
+    </div>
+    <div style="font-size:9px;color:var(--dim);text-align:center;margin-bottom:14px;letter-spacing:1px">
+      Laisse vide pour garder les valeurs actuelles
+    </div>
     <div class="popbtns">
-      <button class="btn btn-green" onclick="document.getElementById('combat-popup').classList.remove('show');showPlayerTab('combat')">REJOINDRE</button>
-      <button class="btn btn-gray btn-sm" onclick="document.getElementById('combat-popup').classList.remove('show')">Plus tard</button>
+      <button class="btn btn-green" onclick="joinCombatWithUpdate()">REJOINDRE LE COMBAT</button>
     </div>
   </div>
 </div>

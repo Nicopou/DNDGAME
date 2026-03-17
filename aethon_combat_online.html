@@ -441,9 +441,45 @@ function handlePhase(phase) {
   }
 }
 
+window.joinCombat = function() {
+  const me = CAMPAIGN.members?.[ME.username];
+  if (me) {
+    const pvIn  = document.getElementById('popup-pv');
+    const caIn  = document.getElementById('popup-ca');
+    const dexIn = document.getElementById('popup-dex-pre');
+    if (pvIn)  pvIn.value  = me.pvMax || '';
+    if (caIn)  caIn.value  = me.ca    || '';
+    if (dexIn) dexIn.value = me.dex   || 10;
+  }
+  document.getElementById('combat-popup').classList.add('show');
+};
+
+window.joinCombatWithUpdate = async function() {
+  const pvVal  = document.getElementById('popup-pv').value;
+  const caVal  = document.getElementById('popup-ca').value;
+  const dexVal = document.getElementById('popup-dex-pre')?.value;
+  const upd = {};
+  if (pvVal !== '') {
+    const pv = Math.max(1, parseInt(pvVal)||1);
+    upd[`members/${ME.username}/pvCur`] = pv;
+    upd[`members/${ME.username}/pvMax`] = pv;
+    upd[`members/${ME.username}/parts`] = buildPartHP(pv);
+  }
+  if (caVal !== '') upd[`members/${ME.username}/ca`] = Math.max(1, parseInt(caVal)||10);
+  if (dexVal !== undefined && dexVal !== '') {
+    const dex = parseInt(dexVal)||10;
+    upd[`members/${ME.username}/dex`]  = dex;
+    upd[`members/${ME.username}/init`] = Math.floor((dex-10)/2);
+  }
+  if (Object.keys(upd).length) await update(cRef(''), upd);
+  document.getElementById('combat-popup').classList.remove('show');
+  showPlayerTab('combat');
+  toast('Stats confirmes - bon combat !');
+};
+
 function showCombatPopup() {
   sound('turn');
-  window.joinCombat(); // shows pre-combat update popup
+  window.joinCombat();
 }
 
 // ═══════════════════════════════════
@@ -561,20 +597,19 @@ window.startCombat = async function() {
   if (!Object.keys(en).length) { toast('Ajoute des ennemis'); return; }
   if (!Object.keys(pl).length) { toast('Aucun joueur'); return; }
 
-  // Roll initiative
   showDiceAnimation(async () => {
     const allCombatants = [
       ...Object.values(en).map(e => ({ ...e, id: e.id, isEnemy: true })),
       ...Object.values(pl).map(p => ({ ...p, id: p.username, isEnemy: false }))
     ];
-    allCombatants.forEach(c => { c.initiative = Math.floor(Math.random() * 20) + 1 + (c.init || 0); });
-    allCombatants.sort((a, b) => b.initiative - a.initiative);
+    allCombatants.forEach(cc => { cc.initiative = Math.floor(Math.random()*20)+1+(cc.init||0); });
+    allCombatants.sort((a,b) => b.initiative - a.initiative);
 
-    const order = allCombatants.map(c => ({ id: c.id, name: c.name || c.username, isEnemy: c.isEnemy, initiative: c.initiative }));
+    const order = allCombatants.map(cc => ({ id: cc.id, name: cc.name||cc.username, isEnemy: cc.isEnemy, initiative: cc.initiative }));
     const upd = {};
-    allCombatants.forEach(c => {
-      if (c.isEnemy) upd[`enemies/${c.id}/initiative`] = c.initiative;
-      else upd[`members/${c.username}/initiative`] = c.initiative;
+    allCombatants.forEach(cc => {
+      if (cc.isEnemy) upd[`enemies/${cc.id}/initiative`] = cc.initiative;
+      else            upd[`members/${cc.username}/initiative`] = cc.initiative;
     });
     upd['meta/phase']  = 'combat';
     upd['meta/turn']   = 1;
@@ -582,16 +617,28 @@ window.startCombat = async function() {
     await dbSet('log', {});
     await update(cRef(''), upd);
 
-    // Reset HP
+    // Full reset: HP, parts, bleed, poison, status
     for (const e of Object.values(en)) {
-      await dbSet(`enemies/${e.id}/pvCur`, e.pvMax);
-      await dbSet(`enemies/${e.id}/dead`, false);
-      await dbSet(`enemies/${e.id}/statusEffects`, []);
+      const freshParts = buildPartHP(e.pvMax);
+      await update(cRef(''), {
+        [`enemies/${e.id}/pvCur`]:        e.pvMax,
+        [`enemies/${e.id}/dead`]:         false,
+        [`enemies/${e.id}/statusEffects`]:[],
+        [`enemies/${e.id}/bleed`]:        0,
+        [`enemies/${e.id}/poison`]:       0,
+        [`enemies/${e.id}/parts`]:        freshParts,
+      });
     }
+    // Players keep their declared HP but reset parts/status
     for (const p of Object.values(pl)) {
-      await dbSet(`members/${p.username}/pvCur`, p.pvMax);
-      await dbSet(`members/${p.username}/dead`, false);
-      await dbSet(`members/${p.username}/statusEffects`, []);
+      const freshParts = buildPartHP(p.pvMax || 20);
+      await update(cRef(''), {
+        [`members/${p.username}/dead`]:         false,
+        [`members/${p.username}/statusEffects`]:[],
+        [`members/${p.username}/bleed`]:        0,
+        [`members/${p.username}/poison`]:       0,
+        [`members/${p.username}/parts`]:        freshParts,
+      });
     }
 
     showDMTab('combat');
@@ -696,6 +743,7 @@ function renderAll() {
   renderMemberList();
   renderCombatCards();
   renderInitiativeBar();
+  refreshDoTCombatPanel();
 }
 
 function renderEnemySetupList() {
@@ -746,6 +794,57 @@ window.clearDoT = async function() {
   await update(cRef(''), { [`${tp}/bleed`]: 0, [`${tp}/poison`]: 0 });
   toast('Effets DoT effaces');
 };
+
+function getDotTargets() {
+  const enemies = Object.values(CAMPAIGN.enemies||{}).filter(e=>!e.dead);
+  const members = Object.values(CAMPAIGN.members||{}).filter(p=>!p.dead);
+  return [
+    ...enemies.map(e => ({id:e.id, label:e.name, isEnemy:true, bleed:e.bleed||0, poison:e.poison||0})),
+    ...members.map(p => ({id:p.username, label:p.username, isEnemy:false, bleed:p.bleed||0, poison:p.poison||0}))
+  ];
+}
+
+window.applyDoTCombat = async function() {
+  const sel = document.getElementById('dot-target-combat').value;
+  const type= document.getElementById('dot-type-combat').value;
+  const amt = parseInt(document.getElementById('dot-amount-combat').value)||1;
+  if (!sel) { toast('Choisis une cible'); return; }
+  const [id, isEnemyStr] = sel.split(':');
+  const isEnemy = isEnemyStr === 'true';
+  const tp = isEnemy ? `enemies/${id}` : `members/${id}`;
+  const data = isEnemy ? CAMPAIGN.enemies?.[id] : CAMPAIGN.members?.[id];
+  if (!data) return;
+  const cur = data[type]||0;
+  await dbSet(`${tp}/${type}`, cur+amt);
+  const label = isEnemy ? data.name : data.username;
+  toast((type==='bleed'?'Saignement':'Poison')+' x'+(cur+amt)+' sur '+label);
+};
+
+window.clearDoTCombat = async function() {
+  const sel = document.getElementById('dot-target-combat').value;
+  if (!sel) { toast('Choisis une cible'); return; }
+  const [id, isEnemyStr] = sel.split(':');
+  const isEnemy = isEnemyStr === 'true';
+  const tp = isEnemy ? `enemies/${id}` : `members/${id}`;
+  await update(cRef(''), {[`${tp}/bleed`]:0,[`${tp}/poison`]:0});
+  toast('Effets effaces');
+};
+
+function refreshDoTCombatPanel() {
+  const sel = document.getElementById('dot-target-combat');
+  const list= document.getElementById('dot-active-list');
+  const targets = getDotTargets();
+  if (sel) {
+    sel.innerHTML = '<option value="">-- Cible --</option>' +
+      targets.map(t=>`<option value="${t.id}:${t.isEnemy}">${t.label}</option>`).join('');
+  }
+  if (list) {
+    const active = targets.filter(t=>t.bleed>0||t.poison>0);
+    list.innerHTML = active.length ? active.map(t=>
+      `<div>${t.label}: ${t.bleed>0?`<span style="color:var(--red)">SAIGNE x${t.bleed}</span> `:''}${t.poison>0?`<span style="color:var(--purple)">POISON ${t.poison}</span>`:''}</div>`
+    ).join('') : '';
+  }
+}
 
 function renderDoTList() {
   const el = document.getElementById('dot-list'); if (!el) return;
@@ -1083,8 +1182,16 @@ async function applyAttack(p) {
   const turn = CAMPAIGN.meta?.turn || 1;
   const tp = p.tgt.type === 'ally' ? `members/${p.tgt.username}` : `enemies/${p.tgt.id}`;
   const upd = {};
+
   if (p.isHit) {
+    // Update global HP
     upd[`${tp}/pvCur`] = p.hpAfter;
+
+    // Update part HP — persist the reduced value
+    if (p.partData && p.partHPAfter !== null && p.partHPAfter !== undefined) {
+      upd[`${tp}/parts/${selPart}/cur`] = p.partHPAfter;
+    }
+
     if (p.wouldKill) {
       upd[`${tp}/dead`]          = true;
       upd[`${tp}/statusEffects`] = ['MORT'];
@@ -1092,10 +1199,17 @@ async function applyAttack(p) {
       showBloodSplatter();
     } else {
       sound(p.isCrit ? 'crit' : 'hit');
-      if (p.isCrit && p.part.fx) {
+      // Apply condition from broken part
+      if (p.partBroken) {
+        const partDef = PARTS[selPart];
         const cur = p.tgt.statusEffects || [];
-        const sh  = p.part.fx.split(' (')[0];
-        if (!cur.includes(sh)) upd[`${tp}/statusEffects`] = [...cur, sh];
+        if (partDef.conditionLabel && !cur.includes(partDef.conditionLabel)) {
+          upd[`${tp}/statusEffects`] = [...cur, partDef.conditionLabel];
+        }
+        // Auto-bleed from broken leg
+        if (selPart === 'jambe_g' || selPart === 'jambe_d') {
+          upd[`${tp}/bleed`] = (p.tgt.bleed||0) + 1;
+        }
       }
     }
   } else {
@@ -1176,8 +1290,9 @@ async function advanceTurn() {
   renderInitiativeBar();
 }
 
-// Damage over Time: bleed + poison
+// Damage over Time: bleed + poison — only during active combat
 async function applyDoTEffects(combatant) {
+  if (CAMPAIGN.meta?.phase !== 'combat') return;
   const tp = combatant.isEnemy
     ? `enemies/${combatant.id}`
     : `members/${combatant.id}`;
@@ -1814,7 +1929,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
           </div>
           <div class="card">
             <div class="ctitle">POISON / SAIGNEMENT MANUEL</div>
-            <p style="font-size:10px;color:var(--dim);margin-bottom:10px">Appliquer des effets DoT a un combattant</p>
+            <p style="font-size:10px;color:var(--dim);margin-bottom:10px">Applique pendant le combat uniquement — prend effet au debut du prochain tour</p>
             <div class="sform" style="flex-wrap:wrap;gap:8px;margin-bottom:8px">
               <div class="f" style="margin:0;flex:2;min-width:120px">
                 <label>Combattant</label>
@@ -1853,6 +1968,25 @@ button:disabled{opacity:.4;cursor:not-allowed}
             <div id="comb-dm"></div>
           </div>
           <button class="btn btn-gray btn-sm" onclick="skipTurn()" style="width:100%;margin-top:4px">PASSER LE TOUR</button>
+        <div class="card" style="margin-top:10px;padding:12px">
+          <div style="font-size:9px;letter-spacing:2px;color:var(--gold);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)">EFFETS DoT</div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <select id="dot-target-combat" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:11px;padding:5px 8px;border-radius:3px;outline:none"><option value="">-- Cible --</option></select>
+            <div style="display:flex;gap:4px">
+              <select id="dot-type-combat" style="flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:10px;padding:5px 6px;border-radius:3px;outline:none">
+                <option value="bleed">Saignement 1d4</option>
+                <option value="poison">Poison PV fixes</option>
+              </select>
+              <input id="dot-amount-combat" type="number" value="1" min="0" placeholder="qty"
+                style="width:50px;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:13px;text-align:center;padding:5px;border-radius:3px;outline:none"/>
+            </div>
+            <div style="display:flex;gap:4px">
+              <button class="btn btn-red btn-sm" onclick="applyDoTCombat()" style="flex:1;padding:5px">+ APPLIQUER</button>
+              <button class="btn btn-gray btn-sm" onclick="clearDoTCombat()" style="flex:1;padding:5px">EFFACER</button>
+            </div>
+            <div id="dot-active-list" style="font-size:9px;color:var(--dim)"></div>
+          </div>
+        </div>
         </div>
         <div class="card">
           <div class="ctitle">S.C.A.V. — CIBLAGE (ENNEMIS)</div>
@@ -2048,20 +2182,25 @@ button:disabled{opacity:.4;cursor:not-allowed}
   <div class="popbox" style="max-width:420px">
     <div class="poptitle">COMBAT LANCE !</div>
     <div class="popsub">Verifie tes stats avant d'entrer.</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:16px 0;text-align:left">
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:16px 0;text-align:left">
       <div class="f" style="margin:0">
-        <label style="font-size:9px;letter-spacing:2px;color:var(--dim);display:block;margin-bottom:4px">PV ACTUELS</label>
-        <input id="popup-pv" type="number" min="0" placeholder="ex: 18"
+        <label style="font-size:9px;letter-spacing:2px;color:var(--dim);display:block;margin-bottom:4px">PV MAX</label>
+        <input id="popup-pv" type="number" min="1" placeholder="ex: 20"
           style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:18px;text-align:center;padding:8px;border-radius:3px;outline:none"/>
       </div>
       <div class="f" style="margin:0">
-        <label style="font-size:9px;letter-spacing:2px;color:var(--dim);display:block;margin-bottom:4px">CLASSE D'ARMURE</label>
+        <label style="font-size:9px;letter-spacing:2px;color:var(--dim);display:block;margin-bottom:4px">CA</label>
         <input id="popup-ca" type="number" min="1" placeholder="ex: 15"
+          style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:18px;text-align:center;padding:8px;border-radius:3px;outline:none"/>
+      </div>
+      <div class="f" style="margin:0">
+        <label style="font-size:9px;letter-spacing:2px;color:var(--dim);display:block;margin-bottom:4px">DEX</label>
+        <input id="popup-dex-pre" type="number" min="1" max="30" placeholder="ex: 14"
           style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:18px;text-align:center;padding:8px;border-radius:3px;outline:none"/>
       </div>
     </div>
     <div style="font-size:9px;color:var(--dim);text-align:center;margin-bottom:14px;letter-spacing:1px">
-      Laisse vide pour garder les valeurs actuelles
+      Confirme ou modifie tes stats avant d entrer
     </div>
     <div class="popbtns">
       <button class="btn btn-green" onclick="joinCombatWithUpdate()">REJOINDRE LE COMBAT</button>

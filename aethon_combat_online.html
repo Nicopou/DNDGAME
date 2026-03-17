@@ -5,10 +5,25 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AETHON RPG</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;900&family=Share+Tech+Mono&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
-<script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-import { getDatabase, ref, set, get, onValue, push, update, remove, off, serverTimestamp }
-  from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+<script>
+// Firebase loaded via CDN scripts above
+let initializeApp, getDatabase, ref, set, get, onValue, push, update, remove, off, serverTimestamp;
+
+async function loadFirebase() {
+  const fbApp = await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js");
+  const fbDb  = await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js");
+  initializeApp = fbApp.initializeApp;
+  getDatabase = fbDb.getDatabase;
+  ref = fbDb.ref; set = fbDb.set; get = fbDb.get;
+  onValue = fbDb.onValue; push = fbDb.push; update = fbDb.update;
+  remove = fbDb.remove; off = fbDb.off;
+  serverTimestamp = fbDb.serverTimestamp;
+  // Init firebase
+  const app = initializeApp(firebaseConfig);
+  window._db = getDatabase(app);
+  console.log('Firebase loaded');
+}
+loadFirebase();
 
 const firebaseConfig = {
   apiKey:"AIzaSyCRaTm5QIskDXX53zTEPo6pE9P1tPm6zWw",
@@ -20,8 +35,8 @@ const firebaseConfig = {
   appId:"1:309499797158:web:27e831ad1df9e672acde67"
 };
 
-const app = initializeApp(firebaseConfig);
-const db  = getDatabase(app);
+// Firebase init handled in loadFirebase()
+Object.defineProperty(window, "db", { get: () => window._db });
 
 // ═══════════════════════════════════
 // GLOBAL STATE
@@ -171,6 +186,7 @@ function show(id) {
 // AUTH — LOGIN / REGISTER
 // ═══════════════════════════════════
 window.authSubmit = async function(isRegister) {
+  if (!window._db) { toast('Connexion Firebase en cours... Reessaie dans 2 secondes'); return; }
   const u = document.getElementById('auth-user').value.trim();
   const p = document.getElementById('auth-pass').value.trim();
   if (!u || !p) { toast('Remplis tous les champs'); return; }
@@ -976,7 +992,7 @@ if (saved) {
   } catch(e) {}
 }
 
-document.addEventListener('DOMContentLoaded', () => selPart('torse'));
+// selPart called after firebase loads
 </script>
 <style>
 :root{
@@ -1231,7 +1247,7 @@ input[type=number]{-moz-appearance:textfield}input[type=number]::-webkit-outer-s
     <div class="authtitle" id="auth-title">CONNEXION</div>
     <div class="f"><label>Pseudo</label><input id="auth-user" placeholder="Ton pseudo..."/></div>
     <div class="f"><label>Mot de passe</label><input id="auth-pass" type="password" placeholder="Mot de passe..." onkeydown="if(event.key==='Enter')authSubmit(false)"/></div>
-    <button class="btn btn-gold" id="auth-btn" authSubmit(document.getElementById('auth-title').textContent.includes('CREER'))">SE CONNECTER</button>
+    <button class="btn btn-gold" id="auth-btn" onclick="authSubmit(document.getElementById('auth-title').textContent.includes('CREER'))">SE CONNECTER</button>
     <div class="auth-toggle" id="auth-toggle" onclick="toggleAuthMode()">Pas de compte ? S'inscrire</div>
   </div>
 </div>
@@ -1555,14 +1571,18 @@ input[type=number]{-moz-appearance:textfield}input[type=number]::-webkit-outer-s
 <div id="toast"></div>
 
 <script>
-// Patch loadCampaigns to show username
-const orig = window.joinSession;
+// This runs after main script - patch show() to update username
 document.addEventListener('DOMContentLoaded', () => {
-  const uEl = document.getElementById('camp-username');
-  if (uEl && window.ME?.username) uEl.textContent = window.ME.username;
+  // Wait for firebase to load then init
+  const waitFirebase = setInterval(() => {
+    if (window._db) {
+      clearInterval(waitFirebase);
+      if (typeof selPart === 'function') selPart('torse');
+    }
+  }, 100);
 });
-// Override show to update username display
-const origShow = window.show || function(){};
+
+const _origShow = window.show;
 window.show = function(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   const el = document.getElementById(id);
@@ -1570,7 +1590,7 @@ window.show = function(id) {
   if (id === 'screen-campaigns') {
     const uEl = document.getElementById('camp-username');
     if (uEl && window.ME?.username) uEl.textContent = window.ME.username;
-    if (window.loadCampaigns) window.loadCampaigns();
+    setTimeout(() => { if (window.loadCampaigns) window.loadCampaigns(); }, 100);
   }
 };
 </script>

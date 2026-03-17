@@ -165,16 +165,54 @@ function sound(type) {
 // ═══════════════════════════════════
 // BODY PARTS
 // ═══════════════════════════════════
+// Body part definitions
+// hpPct: % of total HP this part represents
+// killThreshold: if part HP <= 0, instant kill (only tete/cou)
+// dcMod: extra difficulty to hit this part
+// condition: applied when part HP hits 0
 const PARTS = {
-  tete:    {name:'Tete',        dcMod:4,  mult:1.5,  killPct:.30, crit:true,  fx:'ASSOMME (CD14 CON)',   kfx:'Crane fracasse',  instantKill:false},
-  cou:     {name:'Cou',         dcMod:6,  mult:2.0,  killPct:.25, crit:true,  fx:'DECAPITATION',         kfx:'Gorge tranchee',  instantKill:true},
-  torse:   {name:'Torse',       dcMod:0,  mult:1.0,  killPct:0,   crit:false, fx:'Perforation x1.5',     kfx:'Coup fatal',      instantKill:false},
-  bras_g:  {name:'Bras gauche', dcMod:2,  mult:.75,  killPct:0,   crit:false, fx:'DESARME (CD13)',       kfx:'Bras arrache',    instantKill:false},
-  bras_d:  {name:'Bras droit',  dcMod:2,  mult:.75,  killPct:0,   crit:false, fx:'DESARME (CD13)',       kfx:'Bras arrache',    instantKill:false},
-  bassin:  {name:'Bassin',      dcMod:1,  mult:1.0,  killPct:0,   crit:false, fx:'VITESSE/2 (CD12)',     kfx:'Bassin fracasse', instantKill:false},
-  jambe_g: {name:'Jambe g.',    dcMod:2,  mult:.75,  killPct:0,   crit:false, fx:'ENTRAVE vitesse=0',   kfx:'Jambe brisee',   instantKill:false},
-  jambe_d: {name:'Jambe d.',    dcMod:2,  mult:.75,  killPct:0,   crit:false, fx:'ENTRAVE vitesse=0',   kfx:'Jambe brisee',   instantKill:false},
+  tete:    { name:'Tete',        dcMod:4, hpPct:.25, instantKill:true,
+             conditionKey:'assomme',   conditionLabel:'ASSOMME',
+             onBreak:'Tete ecrasee - mort instantanee' },
+  cou:     { name:'Cou',         dcMod:6, hpPct:.20, instantKill:true,
+             conditionKey:'decapite',  conditionLabel:'DECAPITE',
+             onBreak:'Cou tranche - mort instantanee' },
+  torse:   { name:'Torse',       dcMod:0, hpPct:.40, instantKill:false,
+             conditionKey:null,        conditionLabel:null,
+             onBreak:'Perforation des organes' },
+  bras_g:  { name:'Bras gauche', dcMod:2, hpPct:.15, instantKill:false,
+             conditionKey:'desarme_g', conditionLabel:'DESARME',
+             onBreak:'Bras gauche inutilisable - desarme' },
+  bras_d:  { name:'Bras droit',  dcMod:2, hpPct:.15, instantKill:false,
+             conditionKey:'bras_brise', conditionLabel:'-2 ATK',
+             onBreak:'Bras droit brise - malus -2 aux attaques' },
+  bassin:  { name:'Bassin',      dcMod:1, hpPct:.25, instantKill:false,
+             conditionKey:'bassin_brise', conditionLabel:'BLOQUE',
+             onBreak:'Bassin fracasse - immobilise 1 tour' },
+  jambe_g: { name:'Jambe g.',    dcMod:2, hpPct:.15, instantKill:false,
+             conditionKey:'saignement', conditionLabel:'SAIGNE 1d4',
+             onBreak:'Jambe brisee - saignement 1d4 par tour' },
+  jambe_d: { name:'Jambe d.',    dcMod:2, hpPct:.15, instantKill:false,
+             conditionKey:'saignement', conditionLabel:'SAIGNE 1d4',
+             onBreak:'Jambe brisee - saignement 1d4 par tour' },
 };
+
+// Build part HP object from total HP
+function buildPartHP(totalHP) {
+  const parts = {};
+  Object.entries(PARTS).forEach(([key, p]) => {
+    parts[key] = { max: Math.max(1, Math.round(totalHP * p.hpPct)), cur: Math.max(1, Math.round(totalHP * p.hpPct)) };
+  });
+  return parts;
+}
+
+// Get part HP display for DM
+function getPartHPDisplay(combatant, partKey) {
+  if (!combatant.parts) return '';
+  const ph = combatant.parts[partKey];
+  if (!ph) return '';
+  return ph.cur + '/' + ph.max;
+}
 
 // ═══════════════════════════════════
 // FIREBASE HELPERS
@@ -448,12 +486,19 @@ window.addEnemy = async function() {
   const name = document.getElementById('e-name').value.trim();
   const ca   = parseInt(document.getElementById('e-ca').value) || 12;
   const pv   = parseInt(document.getElementById('e-pv').value) || 20;
-  const init = parseInt(document.getElementById('e-init').value) || 0;
+  const dex  = parseInt(document.getElementById('e-init').value) || 10;
+  const init = Math.floor((dex - 10) / 2);
   if (!name) { toast('Nom requis'); return; }
   const id = 'e_' + Date.now().toString(36);
-  await dbSet(`enemies/${id}`, { id, name, ca, pvMax: pv, pvCur: pv, init, dead: false, statusEffects: [], type: 'enemy', initiative: 0 });
+  const partHP = buildPartHP(pv);
+  await dbSet(`enemies/${id}`, {
+    id, name, ca, pvMax: pv, pvCur: pv, dex, init,
+    dead: false, statusEffects: [], conditions: {},
+    bleed: 0, poison: 0,
+    type: 'enemy', initiative: 0, parts: partHP
+  });
   document.getElementById('e-name').value = '';
-  toast(name + ' ajoute');
+  toast(name + ' ajoute (DEX ' + dex + ' → init ' + (init>=0?'+':'') + init + ')');
 };
 
 window.removeEnemy = async function(id) { await dbDel(`enemies/${id}`); };
@@ -496,10 +541,13 @@ window.saveMyChar = async function() {
   const existing = await get(ref(db, `campaigns/${ME.campaignId}/members/${ME.username}`)).then(s => s.val());
   const existingStats = existing?.stats || { hits:0, misses:0, crits:0, kills:0, totalDmg:0, totalDmgTaken:0, bestHit:0 };
 
+  const existingParts = existing?.parts || null;
   await set(ref(db, `campaigns/${ME.campaignId}/members/${ME.username}`), {
     username: ME.username, ca, pvMax: pv, pvCur: pv, dex, init: initMod,
     class: cls, online: true, ready: true, dead: false,
-    statusEffects: [], type: 'ally', initiative: 0, stats: existingStats
+    statusEffects: [], conditions: {}, bleed: 0, poison: 0,
+    type: 'ally', initiative: 0, stats: existingStats,
+    parts: existingParts || buildPartHP(pv)
   });
   toast('Personnage sauvegarde !');
   document.getElementById('saved-badge').style.display = 'block';
@@ -658,8 +706,60 @@ function renderEnemySetupList() {
     <span class="sname">${e.name}</span>
     <span class="sstat">CA ${e.ca}</span>
     <span class="sstat">PV ${e.pvMax}</span>
+    <span class="sstat" style="font-size:9px;color:var(--dim)">DEX ${e.dex||10} (init ${e.init>=0?'+':''}${e.init||0})</span>
     <button class="btn-icon" onclick="removeEnemy('${e.id}')">x</button>
   </div>`).join('');
+
+  // Populate DoT dropdown
+  const sel = document.getElementById('dot-target');
+  if (sel) {
+    const members = Object.values(CAMPAIGN.members || {});
+    const all = [...arr.map(e => ({id:e.id, label:e.name, isEnemy:true})),
+                 ...members.map(p => ({id:p.username, label:p.username, isEnemy:false}))];
+    sel.innerHTML = '<option value="">-- Choisir --</option>' +
+      all.map(a => `<option value="${a.id}:${a.isEnemy}">${a.label}</option>`).join('');
+  }
+  renderDoTList();
+}
+
+window.applyDoT = async function() {
+  const sel = document.getElementById('dot-target').value;
+  const type= document.getElementById('dot-type').value;
+  const amt = parseInt(document.getElementById('dot-amount').value) || 1;
+  if (!sel) { toast('Choisis un combattant'); return; }
+  const [id, isEnemyStr] = sel.split(':');
+  const isEnemy = isEnemyStr === 'true';
+  const tp = isEnemy ? `enemies/${id}` : `members/${id}`;
+  const data = isEnemy ? CAMPAIGN.enemies?.[id] : CAMPAIGN.members?.[id];
+  if (!data) return;
+  const cur = data[type] || 0;
+  await dbSet(`${tp}/${type}`, cur + amt);
+  toast(`${type === 'bleed' ? 'Saignement' : 'Poison'} x${cur+amt} applique sur ${data.name||data.username}`);
+};
+
+window.clearDoT = async function() {
+  const sel = document.getElementById('dot-target').value;
+  if (!sel) { toast('Choisis un combattant'); return; }
+  const [id, isEnemyStr] = sel.split(':');
+  const isEnemy = isEnemyStr === 'true';
+  const tp = isEnemy ? `enemies/${id}` : `members/${id}`;
+  await update(cRef(''), { [`${tp}/bleed`]: 0, [`${tp}/poison`]: 0 });
+  toast('Effets DoT effaces');
+};
+
+function renderDoTList() {
+  const el = document.getElementById('dot-list'); if (!el) return;
+  const all = [
+    ...Object.values(CAMPAIGN.enemies||{}).map(e => ({...e, label:e.name})),
+    ...Object.values(CAMPAIGN.members||{}).map(p => ({...p, label:p.username}))
+  ].filter(c => (c.bleed||0) > 0 || (c.poison||0) > 0);
+  if (!all.length) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div style="font-size:9px;letter-spacing:1px;color:var(--dim);margin-bottom:4px">EFFETS ACTIFS:</div>' +
+    all.map(c => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:3px">
+      <span style="color:var(--text)">${c.label}</span>
+      ${c.bleed>0?`<span style="color:var(--red);font-size:9px">SAIGNE x${c.bleed}</span>`:''}
+      ${c.poison>0?`<span style="color:var(--purple);font-size:9px">POISON ${c.poison}PV/tour</span>`:''}
+    </div>`).join('');
 }
 
 function renderMemberList() {
@@ -732,7 +832,7 @@ function renderCombatCards() {
           <span class="catag">${showCA?'CA '+(c.ca||'?'):'CA ?'}</span>
         </div>
         <div class="hptr"><div class="hpfl" style="width:${pct}%;background:${hpcol}"></div></div>
-        <div class="hprow">${showHP?c.pvCur+' / '+c.pvMax+' PV':estate}</div>
+        <div class="hprow">${showHP?c.pvCur+' / '+c.pvMax+' PV':estate}${isDM&&c.bleed>0?' <span style="color:var(--red);font-size:8px">SAIGNE x'+c.bleed+'</span>':''}${isDM&&c.poison>0?' <span style="color:var(--purple);font-size:8px">POISON '+c.poison+'</span>':''}</div>
         ${c.statusEffects?.length?'<div class="tagrow">'+c.statusEffects.map(s=>'<span class="stag">'+s+'</span>').join('')+'</div>':''}
         ${isAtk?'<div class="rlbl atklbl">ATTAQUANT</div>':''}
         ${isTgt?'<div class="rlbl tgtlbl">CIBLE</div>':''}
@@ -778,7 +878,6 @@ function getCombatant(cid) {
 // ═══════════════════════════════════
 function refreshAtkPanel() {
   const atk = getCombatant(attackerId), tgt = getCombatant(targetId);
-  // Auto-set attacker name from initiative if available
   const curCombatant = initiativeOrder[currentTurnIndex];
   const autoAtk = curCombatant ? getCombatant(curCombatant.id) : null;
   const displayAtk = atk || autoAtk;
@@ -789,10 +888,28 @@ function refreshAtkPanel() {
   document.querySelectorAll('#tgtlbl, #tgtlbl-p').forEach(e => {
     e.textContent = tgt ? (tgt.name||tgt.username) : '- Selectionne une cible -';
   });
-  // DM sees target CA
   document.querySelectorAll('#tgt-ca').forEach(ci => {
     ci.textContent = tgt && ME.role==='gm' ? 'CA '+tgt.ca : '';
   });
+
+  // DM: update part buttons with target part HP
+  if (ME.role === 'gm' && tgt && tgt.parts) {
+    Object.entries(PARTS).forEach(([key, p]) => {
+      const ph = tgt.parts[key];
+      if (!ph) return;
+      const btn = document.getElementById('pb-'+key);
+      if (!btn) return;
+      const pct = ph.cur / ph.max;
+      const col = pct > 0.5 ? '#3dba63' : pct > 0 ? '#e8b84b' : '#cc3333';
+      const existing = btn.querySelector('.part-hp');
+      if (existing) existing.remove();
+      const span = document.createElement('span');
+      span.className = 'part-hp';
+      span.style.cssText = `font-size:9px;color:${col};margin-left:4px`;
+      span.textContent = ph.cur+'/'+ph.max;
+      btn.querySelector('.pname').after(span);
+    });
+  }
 }
 
 window.selPart = function(k) {
@@ -823,12 +940,19 @@ window.computeResult = function() {
   const isCrit   = d20 === 20, isFumble = d20 === 1;
   const req      = (tgt.ca || 10) + part.dcMod;
   const isHit    = !isNaN(d20) && (isCrit || (!isFumble && d20 >= req));
-  let   dmg      = 0;
-  // Crit: double the dice result THEN apply part multiplier
-  if (isHit && !isNaN(dmgR)) dmg = Math.max(0, Math.round((isCrit ? dmgR * 2 : dmgR) * part.mult));
+  let dmg = 0;
+  // Crit doubles the dice roll
+  if (isHit && !isNaN(dmgR)) dmg = Math.max(0, isCrit ? dmgR * 2 : dmgR);
+
+  // Check part HP
+  const partData    = tgt.parts?.[selPart] || null;
+  const partHPAfter = partData ? Math.max(0, partData.cur - dmg) : null;
+  const partBroken  = partData && partHPAfter === 0 && partData.cur > 0;
+  const instantKill = isHit && part.instantKill && partBroken;
+
+  // Overall HP damage — always applied
   const hpAfter  = Math.max(0, (tgt.pvCur || 0) - dmg);
-  // Crit = x2 dmg ONLY - never auto kill. Kill only when HP reaches 0.
-  const wouldKill= isHit && hpAfter <= 0;
+  const wouldKill = isHit && (hpAfter <= 0 || instantKill);
   const rtype    = isFumble?'fumble':!isHit?'miss':wouldKill?'kill':isCrit?'crit':'hit';
   const cols     = {hit:'#3dba63',miss:'#666',crit:'#e8b84b',kill:'#cc3333',fumble:'#cc3333'};
   const labs     = {hit:'TOUCHE',miss:'RATE',crit:'CRITIQUE !',kill:'COUP FATAL',fumble:'FUMBLE'};
@@ -838,7 +962,6 @@ window.computeResult = function() {
   if (isNaN(d20)) {
     resultHTML = '<span class="dim">Entre ton jet de d20</span>';
   } else if (!isHit) {
-    // Players don't see CA details
     if (isDMview) {
       resultHTML = `<strong style="color:#666">RATE</strong> - ${d20} vs CA ${req} (CA ${tgt.ca||'?'}+${part.dcMod})`;
     } else {
@@ -847,13 +970,17 @@ window.computeResult = function() {
   } else {
     let h = `<strong style="color:${cols[rtype]}">${labs[rtype]}</strong>`;
     if (!isNaN(dmgR)) h += ` - <strong style="color:${cols[rtype]}">${dmg} degats</strong>`;
-    if (isDMview && isHit && !isNaN(dmgR)) h += `<br><span class="dim">${tgt.name||tgt.username}: ${tgt.pvCur} → ${hpAfter} PV</span>`;
-    if (isCrit) h += `<br><em style="color:var(--purple)">${part.fx}</em>`;
-    if (wouldKill) h += `<br><strong style="color:var(--red)">${part.kfx}</strong>`;
+    if (isDMview && isHit && !isNaN(dmgR)) {
+      h += `<br><span class="dim">PV globaux: ${tgt.pvCur} → ${hpAfter}</span>`;
+      if (partData) h += `<span class="dim"> | ${part.name}: ${partData.cur} → ${partHPAfter}</span>`;
+    }
+    if (isCrit) h += `<br><em style="color:var(--purple)">CRITIQUE - degats x2</em>`;
+    if (partBroken && !instantKill) h += `<br><em style="color:var(--gold)">${part.onBreak}</em>`;
+    if (wouldKill) h += `<br><strong style="color:var(--red)">${part.onBreak}</strong>`;
     resultHTML = h;
   }
   document.querySelectorAll('#result-box').forEach(rbox => { rbox.innerHTML = resultHTML; });
-  pendingAtk = { d20, dmgR, dmg, isHit, isCrit, isFumble, wouldKill, rtype, req, hpAfter, part, atk, tgt };
+  pendingAtk = { d20, dmgR, dmg, isHit, isCrit, isFumble, wouldKill, rtype, req, hpAfter, part, atk, tgt, partData, partHPAfter, partBroken };
   const btnDisabled = isNaN(d20) || isNaN(dmgR) || d20 < 1 || d20 > 20;
   document.querySelectorAll('#confirm-btn').forEach(btn => { btn.disabled = btnDisabled; });
 };
@@ -1025,7 +1152,6 @@ async function advanceTurn() {
   if (!order.length) { await endCombat(); return; }
 
   let nextIndex = (currentTurnIndex + 1) % initiativeOrder.length;
-  // Skip dead combatants
   let safety = 0;
   while (isCombatantDead(initiativeOrder[nextIndex]?.id, initiativeOrder[nextIndex]?.isEnemy) && safety < 20) {
     nextIndex = (nextIndex + 1) % initiativeOrder.length;
@@ -1036,12 +1162,60 @@ async function advanceTurn() {
   let newRound = CAMPAIGN.combatState?.round || 1;
   if (nextIndex <= currentTurnIndex) { newTurn++; newRound++; }
 
+  // Apply bleed/poison to the NEXT combatant at start of their turn
+  const next = initiativeOrder[nextIndex];
+  if (next && ME.role === 'gm') {
+    await applyDoTEffects(next);
+  }
+
   await update(cRef('combatState'), { currentIndex: nextIndex, round: newRound });
   await dbSet('meta/turn', newTurn);
   currentTurnIndex = nextIndex;
   lastTurnName = '';
   checkMyTurn();
   renderInitiativeBar();
+}
+
+// Damage over Time: bleed + poison
+async function applyDoTEffects(combatant) {
+  const tp = combatant.isEnemy
+    ? `enemies/${combatant.id}`
+    : `members/${combatant.id}`;
+  const data = combatant.isEnemy
+    ? CAMPAIGN.enemies?.[combatant.id]
+    : CAMPAIGN.members?.[combatant.id];
+  if (!data || data.dead) return;
+
+  let totalDot = 0;
+  const msgs = [];
+  const upd = {};
+
+  // Bleed: each stack = 1d4 (we roll server-side as random 1-4)
+  if (data.bleed > 0) {
+    const bleedDmg = Array.from({length: data.bleed}, () => Math.floor(Math.random()*4)+1).reduce((a,b)=>a+b,0);
+    totalDot += bleedDmg;
+    msgs.push(`Saignement: -${bleedDmg} PV`);
+  }
+  // Poison: flat damage per stack
+  if (data.poison > 0) {
+    totalDot += data.poison;
+    msgs.push(`Poison: -${data.poison} PV`);
+  }
+
+  if (totalDot > 0) {
+    const newHP = Math.max(0, (data.pvCur || 0) - totalDot);
+    upd[`${tp}/pvCur`] = newHP;
+    if (newHP <= 0) { upd[`${tp}/dead`] = true; upd[`${tp}/statusEffects`] = ['MORT']; }
+    await update(cRef(''), upd);
+    const dotEntry = {
+      turn: CAMPAIGN.meta?.turn || 1,
+      by: 'SYSTEME', atk: 'Effets', tgt: data.name || data.username,
+      part: msgs.join(' + '), d20: '-', dmg: totalDot,
+      type: 'hit', hpLeft: newHP, hpMax: data.pvMax, ts: Date.now()
+    };
+    await dbPush('log', dotEntry);
+    toast((data.name||data.username) + ': ' + msgs.join(', '));
+  }
 }
 
 function showBloodSplatter() {
@@ -1622,7 +1796,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
               <div class="f"><label>Nom</label><input id="e-name" placeholder="Nom..."/></div>
               <div class="f"><label>CA</label><input id="e-ca" type="number" value="12"/></div>
               <div class="f"><label>PV</label><input id="e-pv" type="number" value="20"/></div>
-              <div class="f"><label>Init</label><input id="e-init" type="number" value="0"/></div>
+              <div class="f"><label>DEX</label><input id="e-init" type="number" value="10" min="1" max="30"/></div>
               <button class="btn btn-gold btn-sm" onclick="addEnemy()" style="align-self:flex-end">+ ADD</button>
             </div>
             <div id="enemy-list"><div class="empty">Aucun ennemi</div></div>
@@ -1635,8 +1809,36 @@ button:disabled{opacity:.4;cursor:not-allowed}
           </div>
           <div class="card" style="background:rgba(42,138,74,.06);border-color:rgba(61,186,99,.3)">
             <div class="ctitle" style="color:var(--greenB)">LANCER LE COMBAT</div>
-            <p style="font-size:11px;color:var(--dim);margin-bottom:14px;line-height:1.7">L'initiative sera tiree automatiquement. Les PV seront reinitialises.</p>
+            <p style="font-size:11px;color:var(--dim);margin-bottom:14px;line-height:1.7">Linitiative sera tiree automatiquement. Les PV seront reinitialises.</p>
             <button class="btn btn-green" onclick="startCombat()" style="width:100%">DEMARRER LE COMBAT</button>
+          </div>
+          <div class="card">
+            <div class="ctitle">POISON / SAIGNEMENT MANUEL</div>
+            <p style="font-size:10px;color:var(--dim);margin-bottom:10px">Appliquer des effets DoT a un combattant</p>
+            <div class="sform" style="flex-wrap:wrap;gap:8px;margin-bottom:8px">
+              <div class="f" style="margin:0;flex:2;min-width:120px">
+                <label>Combattant</label>
+                <select id="dot-target" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:12px;padding:7px 10px;border-radius:3px;outline:none">
+                  <option value="">-- Choisir --</option>
+                </select>
+              </div>
+              <div class="f" style="margin:0;flex:1;min-width:80px">
+                <label>Type</label>
+                <select id="dot-type" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:12px;padding:7px 10px;border-radius:3px;outline:none">
+                  <option value="bleed">Saignement (1d4/stack)</option>
+                  <option value="poison">Poison (PV fixes/tour)</option>
+                </select>
+              </div>
+              <div class="f" style="margin:0;flex:1;min-width:70px">
+                <label>Stacks / PV</label>
+                <input id="dot-amount" type="number" value="1" min="0" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:Share Tech Mono,monospace;font-size:12px;padding:7px 10px;border-radius:3px;outline:none"/>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-red btn-sm" onclick="applyDoT()" style="flex:1">APPLIQUER</button>
+              <button class="btn btn-gray btn-sm" onclick="clearDoT()" style="flex:1">EFFACER EFFETS</button>
+            </div>
+            <div id="dot-list" style="margin-top:10px;font-size:10px;color:var(--dim)"></div>
           </div>
         </div>
       </div>

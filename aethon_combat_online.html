@@ -1231,7 +1231,7 @@ input[type=number]{-moz-appearance:textfield}input[type=number]::-webkit-outer-s
     <div class="authtitle" id="auth-title">CONNEXION</div>
     <div class="f"><label>Pseudo</label><input id="auth-user" placeholder="Ton pseudo..."/></div>
     <div class="f"><label>Mot de passe</label><input id="auth-pass" type="password" placeholder="Mot de passe..." onkeydown="if(event.key==='Enter')authSubmit(false)"/></div>
-    <button class="btn btn-gold" id="auth-btn" onclick="authSubmit(false)">SE CONNECTER</button>
+    <button class="btn btn-gold" id="auth-btn" authSubmit(document.getElementById('auth-title').textContent.includes('CREER'))">SE CONNECTER</button>
     <div class="auth-toggle" id="auth-toggle" onclick="toggleAuthMode()">Pas de compte ? S'inscrire</div>
   </div>
 </div>

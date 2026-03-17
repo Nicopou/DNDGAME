@@ -5,23 +5,41 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AETHON RPG</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;900&family=Share+Tech+Mono&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
-<script>
-// Firebase loaded via CDN scripts above
-let initializeApp, getDatabase, ref, set, get, onValue, push, update, remove, off, serverTimestamp;
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import { getDatabase, ref, set, get, onValue, push, update, remove, off }
+  from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+// Expose all functions to window so onclick handlers can access them
+// This must happen synchronously before any await
+
+window.show = function(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  const el = document.getElementById(id);
+  if (el) el.classList.add('active');
+  if (id === 'screen-campaigns') {
+    const uEl = document.getElementById('camp-username');
+    if (uEl && window.ME && window.ME.username) uEl.textContent = window.ME.username;
+    setTimeout(() => { if (window.loadCampaigns) window.loadCampaigns(); }, 200);
+  }
+};
 
 async function loadFirebase() {
-  const fbApp = await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js");
-  const fbDb  = await import("https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js");
-  initializeApp = fbApp.initializeApp;
-  getDatabase = fbDb.getDatabase;
-  ref = fbDb.ref; set = fbDb.set; get = fbDb.get;
-  onValue = fbDb.onValue; push = fbDb.push; update = fbDb.update;
-  remove = fbDb.remove; off = fbDb.off;
-  serverTimestamp = fbDb.serverTimestamp;
-  // Init firebase
-  const app = initializeApp(firebaseConfig);
-  window._db = getDatabase(app);
-  console.log('Firebase loaded');
+  // Firebase already initialized above
+  const overlay = document.getElementById('firebase-loading');
+  if (overlay) {
+    overlay.style.opacity = '0';
+    setTimeout(() => { overlay.style.display = 'none'; }, 300);
+  }
+  const saved = localStorage.getItem('aethon_user');
+  if (saved) {
+    try {
+      const s = JSON.parse(saved);
+      if (s.username) document.getElementById('auth-user').value = s.username;
+      if (s.password) document.getElementById('auth-pass').value = s.password;
+    } catch(e) {}
+  }
+  window.selPart('torse');
 }
 loadFirebase();
 
@@ -35,8 +53,9 @@ const firebaseConfig = {
   appId:"1:309499797158:web:27e831ad1df9e672acde67"
 };
 
-// Firebase init handled in loadFirebase()
-Object.defineProperty(window, "db", { get: () => window._db });
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+window._db = db;
 
 // ═══════════════════════════════════
 // GLOBAL STATE
@@ -186,7 +205,6 @@ function show(id) {
 // AUTH — LOGIN / REGISTER
 // ═══════════════════════════════════
 window.authSubmit = async function(isRegister) {
-  if (!window._db) { toast('Connexion Firebase en cours... Reessaie dans 2 secondes'); return; }
   const u = document.getElementById('auth-user').value.trim();
   const p = document.getElementById('auth-pass').value.trim();
   if (!u || !p) { toast('Remplis tous les champs'); return; }
@@ -353,13 +371,26 @@ function handlePhase(phase) {
   if (!phase) return;
   const ph = document.getElementById('gm-phase');
   if (ph) {
-    ph.textContent = phase === 'lobby' ? 'LOBBY' : phase === 'combat' ? 'COMBAT' : 'TERMINE';
-    ph.className = 'phase-badge phase-' + phase;
+    ph.textContent = phase === 'lobby' ? 'LOBBY' : phase === 'combat' ? 'COMBAT EN COURS' : 'TERMINE';
+    ph.className = 'phase-badge phase-' + (phase === 'ended' ? 'ended' : phase);
   }
   if (phase === 'combat') {
     if (ME.role !== 'gm') showCombatPopup();
     renderInitiativeBar();
     checkMyTurn();
+  } else if (phase === 'ended' || phase === 'lobby') {
+    // Lock combat tabs - redirect to lobby/setup
+    const isInCombat = document.querySelector('.dpnl.active')?.id === 'dp-combat' || 
+                       document.querySelector('.ppnl.active')?.id === 'pp-combat';
+    if (isInCombat) {
+      if (ME.role === 'gm') showDMTab('setup');
+      else showPlayerTab('lobby');
+      if (phase === 'ended') toast('Le combat est termine !');
+    }
+    // Reset combat state
+    attackerId = null; targetId = null; pendingAtk = null;
+    document.querySelectorAll('#result-box').forEach(el => el.innerHTML = '<span class="dim">Aucun combat en cours</span>');
+    document.querySelectorAll('#confirm-btn').forEach(el => el.disabled = true);
   }
 }
 
@@ -547,8 +578,15 @@ function checkMyTurn() {
   const order = initiativeOrder;
   if (!order.length || currentTurnIndex >= order.length) return;
   const current = order[currentTurnIndex];
-  const isMyTurn = (ME.role === 'gm' && current.isEnemy) || (ME.role !== 'gm' && !current.isEnemy && current.id === ME.username);
-  showTurnPopup(current.name, isMyTurn);
+  const myTurn = isMyTurnNow();
+  showTurnPopup(current.name, myTurn);
+  // Auto-set attacker
+  if (myTurn) {
+    attackerId = current.id;
+    refreshAtkPanel();
+  }
+  // Update input states
+  renderCombatCards();
 }
 
 let lastTurnName = '';
@@ -613,6 +651,27 @@ function renderCombatCards() {
   const phase = CAMPAIGN.meta?.phase;
   const currentId = initiativeOrder[currentTurnIndex]?.id;
   const isCurrentEnemy = initiativeOrder[currentTurnIndex]?.isEnemy;
+  const myTurn = isMyTurnNow();
+
+  // Auto-set attacker from initiative
+  if (myTurn && initiativeOrder[currentTurnIndex]) {
+    const cur = initiativeOrder[currentTurnIndex];
+    attackerId = cur.id;
+    // Auto-set in panel
+    refreshAtkPanel();
+  }
+
+  // Show/hide attack panel + waiting banner based on whose turn it is
+  document.querySelectorAll('#inp-d20, #inp-dmg').forEach(el => { el.disabled = !myTurn; });
+  if (!myTurn) document.querySelectorAll('#confirm-btn').forEach(el => el.disabled = true);
+
+  const cur = initiativeOrder[currentTurnIndex];
+  const waitMsg = cur ? `Tour de <strong style="color:var(--gold)">${cur.name}</strong>...` : '';
+  
+  const wbDM = document.getElementById('waiting-banner-dm');
+  const wbPL = document.getElementById('waiting-banner-player');
+  if (wbDM) { wbDM.style.display = (!myTurn && phase==='combat') ? 'block' : 'none'; wbDM.innerHTML = waitMsg; }
+  if (wbPL) { wbPL.style.display = (!myTurn && phase==='combat') ? 'block' : 'none'; wbPL.innerHTML = waitMsg; }
 
   ['comb-dm','comb-player'].forEach(elId => {
     const el = document.getElementById(elId); if (!el) return;
@@ -655,24 +714,32 @@ function renderCombatCards() {
 }
 
 window.ccClick = function(cid, type) {
-  // Players: self = attacker, enemy = target
-  if (ME.role !== 'gm') {
-    if (type === 'ally') {
-      attackerId = cid;
-    } else {
-      targetId = cid;
-    }
+  if (!isMyTurnNow()) { toast('Ce n\'est pas ton tour !'); return; }
+  // Attacker is always determined by initiative - just set target
+  const isDM = ME.role === 'gm';
+  if (isDM) {
+    // DM clicks enemy as attacker OR player as target
+    if (type === 'enemy' && !attackerId) { attackerId = cid; }
+    else if (type === 'enemy' && attackerId === cid) { attackerId = null; }
+    else if (type !== 'enemy') { targetId = cid; }
+    else { targetId = cid; }
   } else {
-    if (!attackerId) attackerId = cid;
-    else if (attackerId === cid) attackerId = null;
-    else if (!targetId) targetId = cid;
-    else if (targetId === cid) targetId = null;
-    else targetId = cid;
+    // Player: can only select enemies as target
+    if (type === 'enemy') { targetId = cid; }
+    else if (type === 'ally' && cid === ME.username) { attackerId = cid; }
   }
   renderCombatCards();
   refreshAtkPanel();
   computeResult();
 };
+
+function isMyTurnNow() {
+  if (!initiativeOrder.length) return false;
+  const current = initiativeOrder[currentTurnIndex];
+  if (!current) return false;
+  if (ME.role === 'gm') return current.isEnemy === true;
+  return !current.isEnemy && current.id === ME.username;
+}
 
 function getCombatant(cid) {
   return getAllCombatants().find(c => c.id === cid || c.username === cid);
@@ -683,24 +750,44 @@ function getCombatant(cid) {
 // ═══════════════════════════════════
 function refreshAtkPanel() {
   const atk = getCombatant(attackerId), tgt = getCombatant(targetId);
-  ['atklbl','atklbl-p'].forEach(id => { const e=document.getElementById(id); if(e) e.textContent=atk?atk.name||atk.username:'- Aucun -'; });
-  ['tgtlbl','tgtlbl-p'].forEach(id => { const e=document.getElementById(id); if(e) e.textContent=tgt?tgt.name||tgt.username:'- Aucun -'; });
-  const ci = document.getElementById('tgt-ca');
-  if (ci) ci.textContent = tgt && ME.role==='gm' ? 'CA '+tgt.ca : '';
+  // Auto-set attacker name from initiative if available
+  const curCombatant = initiativeOrder[currentTurnIndex];
+  const autoAtk = curCombatant ? getCombatant(curCombatant.id) : null;
+  const displayAtk = atk || autoAtk;
+
+  document.querySelectorAll('#atklbl, #atklbl-p').forEach(e => {
+    e.textContent = displayAtk ? (displayAtk.name||displayAtk.username) : '- Aucun -';
+  });
+  document.querySelectorAll('#tgtlbl, #tgtlbl-p').forEach(e => {
+    e.textContent = tgt ? (tgt.name||tgt.username) : '- Selectionne une cible -';
+  });
+  // DM sees target CA
+  document.querySelectorAll('#tgt-ca').forEach(ci => {
+    ci.textContent = tgt && ME.role==='gm' ? 'CA '+tgt.ca : '';
+  });
 }
 
 window.selPart = function(k) {
+  if (!PARTS[k]) return;
   selPart = k;
+  // Update ALL part buttons (DM + player panels both exist in DOM)
   document.querySelectorAll('.pbtn').forEach(b => b.classList.remove('sel','selc'));
-  document.getElementById('pb-'+k)?.classList.add(PARTS[k].crit ? 'selc' : 'sel');
+  document.querySelectorAll('#pb-'+k).forEach(b => b.classList.add(PARTS[k].crit ? 'selc' : 'sel'));
+  // Update ALL svg parts
   document.querySelectorAll('.svgp').forEach(s => s.classList.remove('svgsel'));
-  document.getElementById('sv-'+k)?.classList.add('svgsel');
+  document.querySelectorAll('#sv-'+k).forEach(s => s.classList.add('svgsel'));
   computeResult();
 };
 
 window.computeResult = function() {
-  const d20  = parseInt(document.getElementById('inp-d20')?.value);
-  const dmgR = parseInt(document.getElementById('inp-dmg')?.value);
+  // Get values from whichever panel is currently active (DM or player)
+  const allD20  = document.querySelectorAll('#inp-d20');
+  const allDmg  = document.querySelectorAll('#inp-dmg');
+  let d20Val = NaN, dmgVal = NaN;
+  allD20.forEach(el => { if (el.value) d20Val = parseInt(el.value); });
+  allDmg.forEach(el => { if (el.value) dmgVal = parseInt(el.value); });
+  const d20  = d20Val;
+  const dmgR = dmgVal;
   if (!attackerId || !targetId) return;
   const atk = getCombatant(attackerId), tgt = getCombatant(targetId);
   if (!atk || !tgt) return;
@@ -716,22 +803,22 @@ window.computeResult = function() {
   const cols     = {hit:'#3dba63',miss:'#666',crit:'#e8b84b',kill:'#cc3333',fumble:'#cc3333'};
   const labs     = {hit:'TOUCHE',miss:'RATE',crit:'CRITIQUE !',kill:'COUP FATAL',fumble:'FUMBLE'};
 
-  const rbox = document.getElementById('result-box');
-  if (rbox) {
-    if (isNaN(d20)) { rbox.innerHTML = '<span class="dim">Entre ton jet de d20</span>'; }
-    else if (!isHit) { rbox.innerHTML = `<strong style="color:#666">RATE</strong> - ${d20} vs CA ${req}`; }
-    else {
-      let h = `<strong style="color:${cols[rtype]}">${labs[rtype]}</strong>`;
-      if (!isNaN(dmgR)) h += ` - <strong style="color:${cols[rtype]}">${dmg} degats</strong>`;
-      if (isHit && !isNaN(dmgR)) h += `<br><span class="dim">${tgt.name||tgt.username}: ${tgt.pvCur} → ${hpAfter} PV</span>`;
-      if (isCrit)     h += `<br><em style="color:var(--purple)">${part.fx}</em>`;
-      if (wouldKill)  h += `<br><strong style="color:var(--red)">${part.kfx}</strong>`;
-      rbox.innerHTML = h;
-    }
+  let resultHTML = '';
+  if (isNaN(d20)) { resultHTML = '<span class="dim">Entre ton jet de d20</span>'; }
+  else if (!isHit) { resultHTML = `<strong style="color:#666">RATE</strong> - ${d20} vs CA ${req} (CA ${tgt.ca||'?'}+${part.dcMod})`; }
+  else {
+    let h = `<strong style="color:${cols[rtype]}">${labs[rtype]}</strong>`;
+    if (!isNaN(dmgR)) h += ` - <strong style="color:${cols[rtype]}">${dmg} degats</strong>`;
+    if (isHit && !isNaN(dmgR)) h += `<br><span class="dim">${tgt.name||tgt.username}: ${tgt.pvCur} → ${hpAfter} PV</span>`;
+    if (isCrit)    h += `<br><em style="color:var(--purple)">${part.fx}</em>`;
+    if (wouldKill) h += `<br><strong style="color:var(--red)">${part.kfx}</strong>`;
+    resultHTML = h;
   }
+  // Update ALL result boxes (DM + player)
+  document.querySelectorAll('#result-box').forEach(rbox => { rbox.innerHTML = resultHTML; });
   pendingAtk = { d20, dmgR, dmg, isHit, isCrit, isFumble, wouldKill, rtype, req, hpAfter, part, atk, tgt };
-  const btn = document.getElementById('confirm-btn');
-  if (btn) btn.disabled = isNaN(d20) || isNaN(dmgR) || d20 < 1 || d20 > 20;
+  const btnDisabled = isNaN(d20) || isNaN(dmgR) || d20 < 1 || d20 > 20;
+  document.querySelectorAll('#confirm-btn').forEach(btn => { btn.disabled = btnDisabled; });
 };
 
 window.confirmAttack = async function() {
@@ -785,13 +872,12 @@ window.confirmAttack = async function() {
   // Advance turn
   await advanceTurn();
 
-  // Reset UI
+  // Reset UI - all panels
   pendingAtk = null; attackerId = null; targetId = null;
-  const d = document.getElementById('inp-d20'); if (d) d.value = '';
-  const g = document.getElementById('inp-dmg'); if (g) g.value = '';
-  const rb= document.getElementById('result-box');
-  if (rb) rb.innerHTML = '<span class="dim">Selectionne ta cible et entre les des</span>';
-  const cb= document.getElementById('confirm-btn'); if (cb) cb.disabled = true;
+  document.querySelectorAll('#inp-d20').forEach(el => el.value = '');
+  document.querySelectorAll('#inp-dmg').forEach(el => el.value = '');
+  document.querySelectorAll('#result-box').forEach(el => el.innerHTML = '<span class="dim">Selectionne ta cible et entre les des</span>');
+  document.querySelectorAll('#confirm-btn').forEach(el => el.disabled = true);
   renderCombatCards(); refreshAtkPanel();
 
   if (p.wouldKill) toast('x ' + (p.tgt.name||p.tgt.username) + ' est mort !');
@@ -845,17 +931,29 @@ window.endCombat = async function() {
   await dbUpd('meta', { phase: 'ended' });
   sound('victory');
   toast('Combat termine !');
+  showDMTab('setup');
 };
 
 window.quitCombatScreen = function() {
-  if (ME.role === 'gm') showDMTab('setup');
-  else showPlayerTab('lobby');
+  if (ME.role === 'gm') {
+    showDMTab('setup');
+  } else {
+    showPlayerTab('lobby');
+  }
 };
 
 // ═══════════════════════════════════
 // LOG
 // ═══════════════════════════════════
 function renderLog() {
+  // Hide log content outside combat
+  if (CAMPAIGN.meta?.phase === 'lobby') {
+    ['log-dm','log-player'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = '<div class="empty">Le combat na pas encore commence</div>';
+    });
+    return;
+  }
   const log = CAMPAIGN.log || {};
   const arr = Object.values(log).sort((a,b) => a.ts - b.ts);
   const isDM = ME.role === 'gm';
@@ -923,8 +1021,13 @@ function renderChat() {
     const el = document.getElementById(id); if (!el) return;
     el.innerHTML = arr.map(m => {
       const isMe = m.from === ME.username, isDMmsg = m.role === 'gm';
+      const d = new Date(m.ts);
+      const timeStr = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
       return `<div class="cmsg ${isMe?'cme':'cother'}">
-        <span class="cfrom ${isDMmsg?'cdm':''}">${isDMmsg?'GM':'◈ '+m.from}</span>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+          <span class="cfrom ${isDMmsg?'cdm':''}">${isDMmsg?'⚔ GM':'◈ '+m.from}</span>
+          <span style="font-size:8px;color:var(--dim)">${timeStr}</span>
+        </div>
         <span class="ctxt">${m.msg}</span>
       </div>`;
     }).join('');
@@ -946,18 +1049,26 @@ window.chatKey = function(e) { if (e.key === 'Enter') sendChat(); };
 
 window.toggleChat = function() {
   chatOpen = !chatOpen;
-  const body  = document.getElementById('chat-body');
-  if (body) body.style.display = chatOpen ? 'flex' : 'none';
-  const btn   = document.getElementById('chat-tog');
-  if (btn) btn.textContent = chatOpen ? '▼' : '▲';
-  const badge = document.getElementById('chat-badge');
-  if (badge) badge.style.display = 'none';
+  // Both DM and player screens have chat-body
+  document.querySelectorAll('#chat-body').forEach(body => {
+    body.style.display = chatOpen ? 'flex' : 'none';
+  });
+  document.querySelectorAll('#chat-tog').forEach(btn => {
+    btn.textContent = chatOpen ? '▼' : '▲';
+  });
+  document.querySelectorAll('#chat-badge').forEach(badge => {
+    badge.style.display = 'none';
+  });
 };
 
 // ═══════════════════════════════════
 // TAB NAV
 // ═══════════════════════════════════
 window.showDMTab = function(t) {
+  // Block combat tab if not in combat phase
+  if (t === 'combat' && CAMPAIGN.meta?.phase !== 'combat') {
+    toast('Lance le combat dabord !'); return;
+  }
   document.querySelectorAll('.dtab').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.dpnl').forEach(p => p.classList.remove('active'));
   document.getElementById('dt-'+t)?.classList.add('active');
@@ -965,6 +1076,10 @@ window.showDMTab = function(t) {
 };
 
 window.showPlayerTab = function(t) {
+  // Block combat tab if not in combat phase
+  if (t === 'combat' && CAMPAIGN.meta?.phase !== 'combat') {
+    toast('Le GM na pas encore lance le combat !'); return;
+  }
   document.querySelectorAll('.ptab').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.ppnl').forEach(p => p.classList.remove('active'));
   document.getElementById('pt-'+t)?.classList.add('active');
@@ -1154,6 +1269,12 @@ input[type=number]{-moz-appearance:textfield}input[type=number]::-webkit-outer-s
 .lturn:first-child{border-top:none;margin-top:0;padding-top:0}
 .lentry{background:var(--bg3);border-left:3px solid var(--border);border-radius:2px;padding:6px 9px;font-size:11px;line-height:1.5}
 .lhit{border-left-color:#3dba63}.lmiss{border-left-color:#555}.lcrit{border-left-color:#e8b84b}.lkill{border-left-color:var(--red)}.lfumble{border-left-color:var(--red)}
+
+/* Read-only combat state */
+.readonly-panel{pointer-events:none;opacity:.5}
+.waiting-turn{background:rgba(197,151,58,.06);border:1px dashed var(--goldD);border-radius:3px;padding:12px;text-align:center;font-size:11px;color:var(--dim);margin-bottom:10px;letter-spacing:1px}
+input:disabled{opacity:.5;cursor:not-allowed}
+button:disabled{opacity:.4;cursor:not-allowed}
 
 /* CHAT */
 #chat-float{position:fixed;bottom:0;left:16px;width:280px;z-index:500;background:var(--panel);border:1px solid var(--border);border-bottom:none;border-radius:6px 6px 0 0;box-shadow:0 -4px 30px rgba(0,0,0,.4);display:flex;flex-direction:column}
@@ -1364,6 +1485,7 @@ input[type=number]{-moz-appearance:textfield}input[type=number]::-webkit-outer-s
         </div>
         <div class="card">
           <div class="ctitle">S.C.A.V. — CIBLAGE (ENNEMIS)</div>
+          <div id="waiting-banner-dm" class="waiting-turn" style="display:none"></div>
           <div class="selrow">
             <div class="selbox ab"><div class="sellbl">ATTAQUANT</div><div class="selval" id="atklbl">- Aucun -</div></div>
             <div class="selbox tb"><div class="sellbl">CIBLE <span id="tgt-ca" style="color:var(--gold);font-size:9px"></span></div><div class="selval" id="tgtlbl">- Aucun -</div></div>
@@ -1482,6 +1604,7 @@ input[type=number]{-moz-appearance:textfield}input[type=number]::-webkit-outer-s
         </div>
         <div class="card">
           <div class="ctitle">MON ATTAQUE</div>
+          <div id="waiting-banner-player" class="waiting-turn" style="display:none"></div>
           <div class="selrow">
             <div class="selbox ab"><div class="sellbl">MOI</div><div class="selval" id="atklbl-p">- Selectionne toi -</div></div>
             <div class="selbox tb"><div class="sellbl">CIBLE</div><div class="selval" id="tgtlbl-p">- Selectionne ennemi -</div></div>
@@ -1570,29 +1693,28 @@ input[type=number]{-moz-appearance:textfield}input[type=number]::-webkit-outer-s
 
 <div id="toast"></div>
 
+<div id="firebase-loading" style="
+  position:fixed;inset:0;background:#08080b;z-index:99999;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;
+  transition:opacity .4s
+">
+  <div style="font-family:'Cinzel',serif;font-size:32px;font-weight:900;color:#c5973a;letter-spacing:8px;text-shadow:0 0 30px rgba(197,151,58,.5)">AETHON</div>
+  <div id="firebase-loading-text" style="font-size:10px;color:#555250;letter-spacing:3px">CONNEXION AU SERVEUR...</div>
+  <div style="width:200px;height:2px;background:#252530;border-radius:1px;overflow:hidden">
+    <div id="firebase-loading-bar" style="height:100%;background:#c5973a;width:0%;transition:width .3s;border-radius:1px"></div>
+  </div>
+</div>
+
 <script>
-// This runs after main script - patch show() to update username
+// Ensure selPart initializes after DOM ready
 document.addEventListener('DOMContentLoaded', () => {
-  // Wait for firebase to load then init
-  const waitFirebase = setInterval(() => {
-    if (window._db) {
-      clearInterval(waitFirebase);
-      if (typeof selPart === 'function') selPart('torse');
+  const waitReady = setInterval(() => {
+    if (window._db && typeof window.selPart === 'function') {
+      clearInterval(waitReady);
+      window.selPart('torse');
     }
   }, 100);
 });
-
-const _origShow = window.show;
-window.show = function(id) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  const el = document.getElementById(id);
-  if (el) el.classList.add('active');
-  if (id === 'screen-campaigns') {
-    const uEl = document.getElementById('camp-username');
-    if (uEl && window.ME?.username) uEl.textContent = window.ME.username;
-    setTimeout(() => { if (window.loadCampaigns) window.loadCampaigns(); }, 100);
-  }
-};
 </script>
 </body>
 </html>

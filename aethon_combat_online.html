@@ -3,11 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AETHON COMBAT</title>
+<title>AETHON RPG</title>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;900&family=Share+Tech+Mono&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-import { getDatabase, ref, set, get, onValue, push, update, remove, off } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+import { getDatabase, ref, set, get, onValue, push, update, remove, off, serverTimestamp }
+  from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 
 const firebaseConfig = {
   apiKey:"AIzaSyCRaTm5QIskDXX53zTEPo6pE9P1tPm6zWw",
@@ -20,245 +21,612 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-const db = getDatabase(app);
+const db  = getDatabase(app);
 
-let ME = {name:'',role:'',sessionId:''};
-let SESSION = {};
+// ═══════════════════════════════════
+// GLOBAL STATE
+// ═══════════════════════════════════
+let ME = null; // {username, role(in campaign), campaignId}
+let CAMPAIGN = {};
 let listeners = [];
 let attackerId = null, targetId = null, selPart = 'torse', pendingAtk = null;
 let chatOpen = true, lastChatTs = 0;
+let currentTurnIndex = 0;
+let initiativeOrder = [];
+let animInterval = null;
 
-const PARTS = {
-  tete:    {name:'Tete',        dcMod:4,  mult:1.5,  killPct:.30,crit:true, fx:'ASSOMME (CD14 CON)',    kfx:'Crane fracasse - mort',   instantKill:false},
-  cou:     {name:'Cou',         dcMod:6,  mult:2.0,  killPct:.25,crit:true, fx:'DECAPITATION',          kfx:'Gorge tranchee - mort',   instantKill:true},
-  torse:   {name:'Torse',       dcMod:0,  mult:1.0,  killPct:0,  crit:false,fx:'Perforation x1.5',      kfx:'Coup fatal au torse',     instantKill:false},
-  bras_g:  {name:'Bras gauche', dcMod:2,  mult:.75,  killPct:0,  crit:false,fx:'DESARME (CD13 FOR)',     kfx:'Bras arrache',            instantKill:false},
-  bras_d:  {name:'Bras droit',  dcMod:2,  mult:.75,  killPct:0,  crit:false,fx:'DESARME (CD13 FOR)',     kfx:'Bras arrache',            instantKill:false},
-  bassin:  {name:'Bassin',      dcMod:1,  mult:1.0,  killPct:0,  crit:false,fx:'VITESSE/2 (CD12 CON)',   kfx:'Bassin fracasse',         instantKill:false},
-  jambe_g: {name:'Jambe g.',    dcMod:2,  mult:.75,  killPct:0,  crit:false,fx:'ENTRAVE vitesse=0',      kfx:'Jambe brisee',            instantKill:false},
-  jambe_d: {name:'Jambe d.',    dcMod:2,  mult:.75,  killPct:0,  crit:false,fx:'ENTRAVE vitesse=0',      kfx:'Jambe brisee',            instantKill:false},
-};
-
-const sRef  = p => ref(db,`sessions/${ME.sessionId}/${p}`);
-const dbSet = (p,v) => set(sRef(p),v);
-const dbUpd = (p,v) => update(sRef(p),v);
-const dbPush= (p,v) => push(sRef(p),v);
-const dbDel = p => remove(sRef(p));
-
-function listen(path,cb){
-  const r=sRef(path);
-  onValue(r,snap=>cb(snap.val()));
-  listeners.push(r);
-}
-
-function show(id){
-  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
-}
-
-window.joinSession = async function(role){
-  const name=document.getElementById('inp-name').value.trim();
-  const sid=document.getElementById('inp-sid').value.trim().toUpperCase();
-  if(!name){toast('Entre ton nom');return;}
-  if(!sid){toast('Entre le code de session');return;}
-  ME={name,role,sessionId:sid};
-  localStorage.setItem('aethon_me',JSON.stringify(ME));
-  if(role==='dm'){
-    const ex=await get(ref(db,`sessions/${sid}`)).then(s=>s.val());
-    if(!ex){
-      await set(ref(db,`sessions/${sid}`),{
-        meta:{turn:1,phase:'lobby',dmName:name,combatId:null},
-        enemies:{},players:{},log:{},chat:{}
+// ═══════════════════════════════════
+// SOUNDS (Web Audio API)
+// ═══════════════════════════════════
+function sound(type) {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const master = ctx.createGain();
+    master.connect(ctx.destination);
+    const t = ctx.currentTime;
+    if (type === 'chat') {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.connect(g); g.connect(master);
+      o.frequency.setValueAtTime(880, t);
+      o.frequency.exponentialRampToValueAtTime(440, t+0.1);
+      g.gain.setValueAtTime(0.12, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t+0.25);
+      o.start(); o.stop(t+0.25);
+    } else if (type === 'hit') {
+      const b = ctx.createOscillator(), bg = ctx.createGain();
+      b.type = 'sawtooth'; b.frequency.setValueAtTime(180, t);
+      b.frequency.exponentialRampToValueAtTime(60, t+0.15);
+      bg.gain.setValueAtTime(0.3, t);
+      bg.gain.exponentialRampToValueAtTime(0.001, t+0.2);
+      b.connect(bg); bg.connect(master);
+      b.start(); b.stop(t+0.2);
+      const n = ctx.createOscillator(), ng = ctx.createGain();
+      n.type = 'square'; n.frequency.setValueAtTime(400, t+0.05);
+      n.frequency.exponentialRampToValueAtTime(100, t+0.25);
+      ng.gain.setValueAtTime(0.2, t+0.05);
+      ng.gain.exponentialRampToValueAtTime(0.001, t+0.3);
+      n.connect(ng); ng.connect(master);
+      n.start(t+0.05); n.stop(t+0.3);
+    } else if (type === 'crit') {
+      [0,0.05,0.1].forEach((d,i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = 'sawtooth';
+        o.frequency.setValueAtTime(300-i*50, t+d);
+        o.frequency.exponentialRampToValueAtTime(60, t+d+0.2);
+        g.gain.setValueAtTime(0.25, t+d);
+        g.gain.exponentialRampToValueAtTime(0.001, t+d+0.25);
+        o.connect(g); g.connect(master);
+        o.start(t+d); o.stop(t+d+0.25);
+      });
+    } else if (type === 'miss') {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine'; o.frequency.setValueAtTime(200, t);
+      o.frequency.exponentialRampToValueAtTime(150, t+0.15);
+      g.gain.setValueAtTime(0.1, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t+0.2);
+      o.connect(g); g.connect(master);
+      o.start(); o.stop(t+0.2);
+    } else if (type === 'kill') {
+      const freqs = [300,250,200,150,100,70];
+      freqs.forEach((f,i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = 'sawtooth'; o.frequency.setValueAtTime(f, t+i*0.06);
+        g.gain.setValueAtTime(0.25, t+i*0.06);
+        g.gain.exponentialRampToValueAtTime(0.001, t+i*0.06+0.18);
+        o.connect(g); g.connect(master);
+        o.start(t+i*0.06); o.stop(t+i*0.06+0.2);
+      });
+    } else if (type === 'turn') {
+      [440,550,660].forEach((f,i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.frequency.setValueAtTime(f, t+i*0.12);
+        g.gain.setValueAtTime(0.15, t+i*0.12);
+        g.gain.exponentialRampToValueAtTime(0.001, t+i*0.12+0.15);
+        o.connect(g); g.connect(master);
+        o.start(t+i*0.12); o.stop(t+i*0.12+0.18);
+      });
+    } else if (type === 'dice') {
+      for(let i=0;i<8;i++) {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = 'square';
+        o.frequency.setValueAtTime(200+Math.random()*600, t+i*0.05);
+        g.gain.setValueAtTime(0.08, t+i*0.05);
+        g.gain.exponentialRampToValueAtTime(0.001, t+i*0.05+0.04);
+        o.connect(g); g.connect(master);
+        o.start(t+i*0.05); o.stop(t+i*0.05+0.06);
+      }
+    } else if (type === 'victory') {
+      [523,659,784,1047].forEach((f,i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.frequency.setValueAtTime(f, t+i*0.15);
+        g.gain.setValueAtTime(0.2, t+i*0.15);
+        g.gain.exponentialRampToValueAtTime(0.001, t+i*0.15+0.3);
+        o.connect(g); g.connect(master);
+        o.start(t+i*0.15); o.stop(t+i*0.15+0.35);
       });
     }
-    show('screen-dm');
-  } else {
-    const ex=await get(ref(db,`sessions/${sid}`)).then(s=>s.val());
-    if(!ex){toast('Session introuvable');return;}
-    await dbSet(`players/${name}`,{name,online:true,joinedAt:Date.now()});
-    show('screen-player');
-  }
-  initListeners();
-  updateHeaders();
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════
+// BODY PARTS
+// ═══════════════════════════════════
+const PARTS = {
+  tete:    {name:'Tete',        dcMod:4,  mult:1.5,  killPct:.30, crit:true,  fx:'ASSOMME (CD14 CON)',   kfx:'Crane fracasse',  instantKill:false},
+  cou:     {name:'Cou',         dcMod:6,  mult:2.0,  killPct:.25, crit:true,  fx:'DECAPITATION',         kfx:'Gorge tranchee',  instantKill:true},
+  torse:   {name:'Torse',       dcMod:0,  mult:1.0,  killPct:0,   crit:false, fx:'Perforation x1.5',     kfx:'Coup fatal',      instantKill:false},
+  bras_g:  {name:'Bras gauche', dcMod:2,  mult:.75,  killPct:0,   crit:false, fx:'DESARME (CD13)',       kfx:'Bras arrache',    instantKill:false},
+  bras_d:  {name:'Bras droit',  dcMod:2,  mult:.75,  killPct:0,   crit:false, fx:'DESARME (CD13)',       kfx:'Bras arrache',    instantKill:false},
+  bassin:  {name:'Bassin',      dcMod:1,  mult:1.0,  killPct:0,   crit:false, fx:'VITESSE/2 (CD12)',     kfx:'Bassin fracasse', instantKill:false},
+  jambe_g: {name:'Jambe g.',    dcMod:2,  mult:.75,  killPct:0,   crit:false, fx:'ENTRAVE vitesse=0',   kfx:'Jambe brisee',   instantKill:false},
+  jambe_d: {name:'Jambe d.',    dcMod:2,  mult:.75,  killPct:0,   crit:false, fx:'ENTRAVE vitesse=0',   kfx:'Jambe brisee',   instantKill:false},
 };
 
-function initListeners(){
-  listen('meta',meta=>{
-    if(!meta)return;
-    SESSION.meta=meta;
-    document.querySelectorAll('.turn-num').forEach(e=>e.textContent=meta.turn||1);
-    handlePhase(meta.phase);
+// ═══════════════════════════════════
+// FIREBASE HELPERS
+// ═══════════════════════════════════
+const cRef  = p => ref(db, `campaigns/${ME.campaignId}/${p}`);
+const dbSet = (p,v) => set(cRef(p), v);
+const dbUpd = (p,v) => update(cRef(p), v);
+const dbPush= (p,v) => push(cRef(p), v);
+const dbDel = p => remove(cRef(p));
+
+function listenC(path, cb) {
+  const r = cRef(path);
+  onValue(r, snap => cb(snap.val()));
+  listeners.push(r);
+}
+function stopListeners() { listeners.forEach(r => off(r)); listeners = []; }
+
+// ═══════════════════════════════════
+// SCREEN NAVIGATION
+// ═══════════════════════════════════
+function show(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  const el = document.getElementById(id);
+  if (el) el.classList.add('active');
+}
+
+// ═══════════════════════════════════
+// AUTH — LOGIN / REGISTER
+// ═══════════════════════════════════
+window.authSubmit = async function(isRegister) {
+  const u = document.getElementById('auth-user').value.trim();
+  const p = document.getElementById('auth-pass').value.trim();
+  if (!u || !p) { toast('Remplis tous les champs'); return; }
+  if (u.length < 3) { toast('Pseudo trop court (min 3 car.)'); return; }
+  if (p.length < 4) { toast('Mot de passe trop court (min 4 car.)'); return; }
+
+  const userRef = ref(db, `users/${u}`);
+  const snap = await get(userRef);
+  const existing = snap.val();
+
+  if (isRegister) {
+    if (existing) { toast('Ce pseudo est deja pris'); return; }
+    await set(userRef, { username: u, password: p, createdAt: Date.now(), campaigns: {} });
+    ME = { username: u };
+    localStorage.setItem('aethon_user', JSON.stringify({ username: u, password: p }));
+    toast('Compte cree ! Bienvenue ' + u);
+    show('screen-campaigns');
+    loadCampaigns();
+  } else {
+    if (!existing) { toast('Utilisateur introuvable'); return; }
+    if (existing.password !== p) { toast('Mot de passe incorrect'); return; }
+    ME = { username: u };
+    localStorage.setItem('aethon_user', JSON.stringify({ username: u, password: p }));
+    show('screen-campaigns');
+    loadCampaigns();
+  }
+};
+
+window.toggleAuthMode = function() {
+  const isReg = document.getElementById('auth-title').textContent === 'CONNEXION';
+  document.getElementById('auth-title').textContent = isReg ? 'CREER UN COMPTE' : 'CONNEXION';
+  document.getElementById('auth-btn').textContent   = isReg ? 'CREER MON COMPTE' : 'SE CONNECTER';
+  document.getElementById('auth-toggle').textContent= isReg ? 'Deja un compte ? Se connecter' : 'Pas de compte ? S\'inscrire';
+};
+
+window.logout = function() {
+  ME = null; stopListeners(); CAMPAIGN = {};
+  localStorage.removeItem('aethon_user');
+  show('screen-auth');
+};
+
+// ═══════════════════════════════════
+// CAMPAIGNS LIST
+// ═══════════════════════════════════
+async function loadCampaigns() {
+  document.getElementById('my-campaigns').innerHTML = '<div class="empty">Chargement...</div>';
+  const snap = await get(ref(db, `users/${ME.username}/campaigns`));
+  const ids = snap.val() || {};
+  if (!Object.keys(ids).length) {
+    document.getElementById('my-campaigns').innerHTML = '<div class="empty">Aucune campagne — creerz-en une ou rejoignez-en une !</div>';
+    return;
+  }
+  let html = '';
+  for (const cid of Object.keys(ids)) {
+    const cs = await get(ref(db, `campaigns/${cid}/meta`)).then(s => s.val());
+    if (!cs) continue;
+    const role = ids[cid];
+    html += `<div class="camp-card" onclick="enterCampaign('${cid}','${role}')">
+      <div class="camp-top">
+        <span class="camp-name">${cs.name}</span>
+        <span class="camp-role ${role}">${role === 'gm' ? 'GAME MASTER' : 'JOUEUR'}</span>
+      </div>
+      <div class="camp-sub">GM: ${cs.gmName} · ${cs.playerCount || 0} joueurs</div>
+    </div>`;
+  }
+  document.getElementById('my-campaigns').innerHTML = html || '<div class="empty">Aucune campagne</div>';
+}
+
+window.createCampaign = async function() {
+  const name = document.getElementById('new-camp-name').value.trim();
+  if (!name) { toast('Entre un nom de campagne'); return; }
+  const cid = 'c_' + Date.now().toString(36);
+  await set(ref(db, `campaigns/${cid}`), {
+    meta: { name, gmName: ME.username, createdAt: Date.now(), phase: 'lobby', turn: 0, playerCount: 0 },
+    gm: ME.username, enemies: {}, members: {}, log: {}, chat: {}, combatLog: {}
   });
-  listen('enemies',d=>{SESSION.enemies=d||{};renderAll();});
-  listen('players',d=>{SESSION.players=d||{};renderAll();});
-  listen('log',d=>{SESSION.log=d||{};renderLog();});
-  listen('chat',d=>{
-    SESSION.chat=d||{};
-    const arr=Object.values(SESSION.chat).sort((a,b)=>a.ts-b.ts);
-    const newest=arr.length?arr[arr.length-1].ts:0;
-    if(newest>lastChatTs&&lastChatTs>0) playChatSound();
-    lastChatTs=newest;
+  await set(ref(db, `users/${ME.username}/campaigns/${cid}`), 'gm');
+  document.getElementById('new-camp-name').value = '';
+  toast('Campagne "' + name + '" creee !');
+  loadCampaigns();
+};
+
+window.searchCampaign = async function() {
+  const name = document.getElementById('search-camp').value.trim();
+  if (!name) { toast('Entre le nom de la campagne'); return; }
+  const snap = await get(ref(db, 'campaigns'));
+  const all = snap.val() || {};
+  const results = Object.entries(all).filter(([id, c]) => c.meta?.name?.toLowerCase() === name.toLowerCase());
+  const el = document.getElementById('search-results');
+  if (!results.length) { el.innerHTML = '<div class="empty">Aucune campagne trouvee</div>'; return; }
+  el.innerHTML = results.map(([id, c]) => `
+    <div class="camp-card">
+      <div class="camp-top"><span class="camp-name">${c.meta.name}</span></div>
+      <div class="camp-sub">GM: ${c.meta.gmName} · ${c.meta.playerCount || 0} joueurs</div>
+      <button class="btn btn-gold btn-sm" style="margin-top:8px" onclick="applyToCampaign('${id}','${c.meta.name}','${c.meta.gmName}')">POSTULER</button>
+    </div>`).join('');
+};
+
+window.applyToCampaign = async function(cid, campName, gmName) {
+  const existing = await get(ref(db, `campaigns/${cid}/applications/${ME.username}`)).then(s => s.val());
+  if (existing) { toast('Demande deja envoyee'); return; }
+  await set(ref(db, `campaigns/${cid}/applications/${ME.username}`), { username: ME.username, ts: Date.now(), status: 'pending' });
+  toast('Demande envoyee a ' + gmName + ' !');
+};
+
+// ═══════════════════════════════════
+// ENTER CAMPAIGN
+// ═══════════════════════════════════
+window.enterCampaign = async function(cid, role) {
+  ME.campaignId = cid;
+  ME.role = role;
+  stopListeners();
+  CAMPAIGN = {};
+  initiativeOrder = [];
+  currentTurnIndex = 0;
+
+  const meta = await get(ref(db, `campaigns/${cid}/meta`)).then(s => s.val());
+  document.querySelectorAll('.camp-title').forEach(e => e.textContent = meta?.name || 'Campagne');
+  document.querySelectorAll('.camp-gm').forEach(e => e.textContent = 'GM: ' + (meta?.gmName || ''));
+
+  initCampaignListeners();
+
+  if (role === 'gm') show('screen-gm');
+  else show('screen-player-camp');
+};
+
+function initCampaignListeners() {
+  listenC('meta', m => {
+    if (!m) return;
+    CAMPAIGN.meta = m;
+    document.querySelectorAll('.turn-num').forEach(e => e.textContent = m.turn || 0);
+    handlePhase(m.phase);
+  });
+  listenC('enemies', d => { CAMPAIGN.enemies = d || {}; renderAll(); });
+  listenC('members', d => { CAMPAIGN.members = d || {}; renderAll(); });
+  listenC('log',     d => { CAMPAIGN.log = d || {}; renderLog(); });
+  listenC('chat',    d => {
+    CAMPAIGN.chat = d || {};
+    const arr = Object.values(CAMPAIGN.chat).sort((a,b) => a.ts - b.ts);
+    const newest = arr.length ? arr[arr.length-1].ts : 0;
+    if (newest > lastChatTs && lastChatTs > 0) sound('chat');
+    lastChatTs = newest;
     renderChat();
   });
+  listenC('applications', d => {
+    CAMPAIGN.applications = d || {};
+    if (ME.role === 'gm') renderApplications();
+  });
+  listenC('combatState', d => {
+    CAMPAIGN.combatState = d || {};
+    if (d) {
+      initiativeOrder = d.order || [];
+      currentTurnIndex = d.currentIndex || 0;
+      renderInitiativeBar();
+      checkMyTurn();
+    }
+  });
 }
 
-function handlePhase(phase){
-  if(!phase)return;
-  const ph=document.getElementById('dm-phase');
-  if(ph){
-    ph.textContent=phase==='lobby'?'LOBBY':phase==='combat'?'COMBAT EN COURS':'COMBAT TERMINE';
-    ph.className='hdr-phase phase-'+phase;
+// ═══════════════════════════════════
+// PHASE HANDLING
+// ═══════════════════════════════════
+function handlePhase(phase) {
+  if (!phase) return;
+  const ph = document.getElementById('gm-phase');
+  if (ph) {
+    ph.textContent = phase === 'lobby' ? 'LOBBY' : phase === 'combat' ? 'COMBAT' : 'TERMINE';
+    ph.className = 'phase-badge phase-' + phase;
   }
-  if(ME.role==='player'){
-    const popup=document.getElementById('combat-popup');
-    if(popup) popup.classList.toggle('show',phase==='combat');
-    document.getElementById('plp-lobby')?.classList.toggle('active',phase==='lobby');
+  if (phase === 'combat') {
+    if (ME.role !== 'gm') showCombatPopup();
+    renderInitiativeBar();
+    checkMyTurn();
   }
 }
 
-function updateHeaders(){
-  document.querySelectorAll('.session-id').forEach(e=>e.textContent='SESSION: '+ME.sessionId);
-  document.querySelectorAll('.my-name').forEach(e=>e.textContent=ME.name);
+function showCombatPopup() {
+  const popup = document.getElementById('combat-popup');
+  if (popup) { popup.classList.add('show'); sound('turn'); }
 }
 
-function renderAll(){
-  renderEnemyList();
-  renderPlayerList();
-  renderCombatCards();
-  renderInitiative();
+// ═══════════════════════════════════
+// GM — APPLICATIONS
+// ═══════════════════════════════════
+function renderApplications() {
+  const el = document.getElementById('applications-list');
+  if (!el) return;
+  const apps = CAMPAIGN.applications || {};
+  const pending = Object.values(apps).filter(a => a.status === 'pending');
+  if (!pending.length) { el.innerHTML = '<div class="empty">Aucune demande</div>'; return; }
+  el.innerHTML = pending.map(a => `
+    <div class="app-row">
+      <span class="app-name">${a.username}</span>
+      <button class="btn btn-green btn-sm" onclick="acceptPlayer('${a.username}')">ACCEPTER</button>
+      <button class="btn btn-red btn-sm"   onclick="rejectPlayer('${a.username}')">REFUSER</button>
+    </div>`).join('');
 }
 
-window.addEnemy = async function(){
-  const name=document.getElementById('e-name').value.trim();
-  const ca=parseInt(document.getElementById('e-ca').value)||12;
-  const pv=parseInt(document.getElementById('e-pv').value)||20;
-  const init=parseInt(document.getElementById('e-init').value)||0;
-  if(!name){toast('Nom requis');return;}
-  const id='e_'+Date.now().toString(36);
-  await dbSet(`enemies/${id}`,{id,name,ca,pvMax:pv,pvCur:pv,init,dead:false,statusEffects:[],type:'enemy'});
-  document.getElementById('e-name').value='';
-  toast(name+' ajoute');
+window.acceptPlayer = async function(username) {
+  await set(ref(db, `campaigns/${ME.campaignId}/applications/${username}/status`), 'accepted');
+  await set(ref(db, `campaigns/${ME.campaignId}/members/${username}`), {
+    username, joinedAt: Date.now(), ready: false, type: 'ally'
+  });
+  await set(ref(db, `users/${username}/campaigns/${ME.campaignId}`), 'player');
+  const cur = CAMPAIGN.meta?.playerCount || 0;
+  await set(ref(db, `campaigns/${ME.campaignId}/meta/playerCount`), cur + 1);
+  toast(username + ' accepte !');
 };
 
-window.removeEnemy = async function(id){ await dbDel(`enemies/${id}`); };
+window.rejectPlayer = async function(username) {
+  await set(ref(db, `campaigns/${ME.campaignId}/applications/${username}/status`), 'rejected');
+  toast(username + ' refuse');
+};
 
-window.loadPreset = function(k){
-  const P={
+// ═══════════════════════════════════
+// GM — ENEMIES
+// ═══════════════════════════════════
+window.addEnemy = async function() {
+  const name = document.getElementById('e-name').value.trim();
+  const ca   = parseInt(document.getElementById('e-ca').value) || 12;
+  const pv   = parseInt(document.getElementById('e-pv').value) || 20;
+  const init = parseInt(document.getElementById('e-init').value) || 0;
+  if (!name) { toast('Nom requis'); return; }
+  const id = 'e_' + Date.now().toString(36);
+  await dbSet(`enemies/${id}`, { id, name, ca, pvMax: pv, pvCur: pv, init, dead: false, statusEffects: [], type: 'enemy', initiative: 0 });
+  document.getElementById('e-name').value = '';
+  toast(name + ' ajoute');
+};
+
+window.removeEnemy = async function(id) { await dbDel(`enemies/${id}`); };
+
+window.loadPreset = function(k) {
+  const P = {
     soldier:{name:'Soldat Maren',ca:14,pv:16,init:0},
     hunter:{name:'Chasseur Concordia',ca:13,pv:22,init:2},
     whisper:{name:'Susurro',ca:12,pv:18,init:2},
     guard:{name:'Garde royal',ca:15,pv:14,init:1},
     bandit:{name:'Bandit',ca:11,pv:10,init:1},
-    troll:{name:'Troll',ca:15,pv:84,init:-1}
+    troll:{name:'Troll',ca:15,pv:84,init:-1},
+    dragon:{name:'Dragon',ca:19,pv:120,init:3},
   };
-  const p=P[k];if(!p)return;
-  document.getElementById('e-name').value=p.name;
-  document.getElementById('e-ca').value=p.ca;
-  document.getElementById('e-pv').value=p.pv;
-  document.getElementById('e-init').value=p.init;
+  const p = P[k]; if (!p) return;
+  document.getElementById('e-name').value  = p.name;
+  document.getElementById('e-ca').value    = p.ca;
+  document.getElementById('e-pv').value    = p.pv;
+  document.getElementById('e-init').value  = p.init;
 };
 
-function renderEnemyList(){
-  const el=document.getElementById('enemy-list');if(!el)return;
-  const arr=Object.values(SESSION.enemies||{});
-  if(!arr.length){el.innerHTML='<div class="empty">Aucun ennemi</div>';return;}
-  el.innerHTML=arr.map(e=>`<div class="setup-row">
+// ═══════════════════════════════════
+// PLAYER — CHARACTER SETUP
+// ═══════════════════════════════════
+window.saveMyChar = async function() {
+  const ca   = parseInt(document.getElementById('p-ca').value) || 10;
+  const pv   = parseInt(document.getElementById('p-pv').value) || 20;
+  const init = parseInt(document.getElementById('p-init').value) || 0;
+  const cls  = document.getElementById('p-class').value.trim() || 'Aventurier';
+  const atk  = parseInt(document.getElementById('p-atk').value) || 3;
+  await set(ref(db, `campaigns/${ME.campaignId}/members/${ME.username}`), {
+    username: ME.username, ca, pvMax: pv, pvCur: pv, init, class: cls, atkBonus: atk,
+    online: true, ready: true, dead: false, statusEffects: [], type: 'ally', initiative: 0,
+    stats: { hits: 0, misses: 0, crits: 0, kills: 0, totalDmg: 0, totalDmgTaken: 0, bestHit: 0 }
+  });
+  toast('Personnage sauvegarde !');
+  document.getElementById('saved-badge').style.display = 'block';
+};
+
+// ═══════════════════════════════════
+// COMBAT START
+// ═══════════════════════════════════
+window.startCombat = async function() {
+  const en = CAMPAIGN.enemies || {}, pl = CAMPAIGN.members || {};
+  if (!Object.keys(en).length) { toast('Ajoute des ennemis'); return; }
+  if (!Object.keys(pl).length) { toast('Aucun joueur'); return; }
+
+  // Roll initiative
+  showDiceAnimation(async () => {
+    const allCombatants = [
+      ...Object.values(en).map(e => ({ ...e, id: e.id, isEnemy: true })),
+      ...Object.values(pl).map(p => ({ ...p, id: p.username, isEnemy: false }))
+    ];
+    allCombatants.forEach(c => { c.initiative = Math.floor(Math.random() * 20) + 1 + (c.init || 0); });
+    allCombatants.sort((a, b) => b.initiative - a.initiative);
+
+    const order = allCombatants.map(c => ({ id: c.id, name: c.name || c.username, isEnemy: c.isEnemy, initiative: c.initiative }));
+    const upd = {};
+    allCombatants.forEach(c => {
+      if (c.isEnemy) upd[`enemies/${c.id}/initiative`] = c.initiative;
+      else upd[`members/${c.username}/initiative`] = c.initiative;
+    });
+    upd['meta/phase']  = 'combat';
+    upd['meta/turn']   = 1;
+    upd['combatState'] = { order, currentIndex: 0, round: 1 };
+    await dbSet('log', {});
+    await update(cRef(''), upd);
+
+    // Reset HP
+    for (const e of Object.values(en)) {
+      await dbSet(`enemies/${e.id}/pvCur`, e.pvMax);
+      await dbSet(`enemies/${e.id}/dead`, false);
+      await dbSet(`enemies/${e.id}/statusEffects`, []);
+    }
+    for (const p of Object.values(pl)) {
+      await dbSet(`members/${p.username}/pvCur`, p.pvMax);
+      await dbSet(`members/${p.username}/dead`, false);
+      await dbSet(`members/${p.username}/statusEffects`, []);
+    }
+
+    showDMTab('combat');
+    toast('Combat lance !');
+    sound('turn');
+  });
+};
+
+function showDiceAnimation(callback) {
+  const overlay = document.getElementById('dice-overlay');
+  overlay.classList.add('show');
+  const faces = ['1','2','3','4','5','6','7','8','9','10','11','12','14','16','20'];
+  let i = 0;
+  sound('dice');
+  const iv = setInterval(() => {
+    document.getElementById('dice-face').textContent = faces[Math.floor(Math.random()*faces.length)];
+    i++;
+    if (i > 24) {
+      clearInterval(iv);
+      document.getElementById('dice-face').textContent = '!';
+      setTimeout(() => { overlay.classList.remove('show'); callback(); }, 500);
+    }
+  }, 80);
+}
+
+// ═══════════════════════════════════
+// INITIATIVE ORDER
+// ═══════════════════════════════════
+function renderInitiativeBar() {
+  const order = initiativeOrder;
+  if (!order.length) return;
+  ['init-bar-gm','init-bar-player'].forEach(id => {
+    const el = document.getElementById(id); if (!el) return;
+    el.innerHTML = order.map((c, i) => {
+      const isCurrent = i === currentTurnIndex;
+      const isDead = isCombatantDead(c.id, c.isEnemy);
+      return `<div class="init-chip ${isCurrent?'current':''} ${isDead?'dead-chip':''} ${c.isEnemy?'enemy-chip':'ally-chip'}">
+        ${isCurrent ? '<span class="init-arrow">▶</span>' : ''}
+        <span class="init-chip-name">${c.name}</span>
+        <span class="init-chip-val">${c.initiative}</span>
+        ${isDead ? '<span style="color:var(--red);font-size:9px">MORT</span>' : ''}
+      </div>`;
+    }).join('');
+  });
+}
+
+function isCombatantDead(id, isEnemy) {
+  if (isEnemy) return CAMPAIGN.enemies?.[id]?.dead || false;
+  return CAMPAIGN.members?.[id]?.dead || false;
+}
+
+function checkMyTurn() {
+  const order = initiativeOrder;
+  if (!order.length || currentTurnIndex >= order.length) return;
+  const current = order[currentTurnIndex];
+  const isMyTurn = (ME.role === 'gm' && current.isEnemy) || (ME.role !== 'gm' && !current.isEnemy && current.id === ME.username);
+  showTurnPopup(current.name, isMyTurn);
+}
+
+let lastTurnName = '';
+function showTurnPopup(name, isMe) {
+  if (name === lastTurnName) return;
+  lastTurnName = name;
+  const pop = document.createElement('div');
+  pop.className = 'turn-popup';
+  pop.innerHTML = `<div class="turn-popup-inner ${isMe?'my-turn':'other-turn'}">
+    ${isMe ? '<div class="turn-pop-big">C\'EST TON TOUR !</div>' : ''}
+    <div class="turn-pop-name">${name}</div>
+    <div class="turn-pop-sub">${isMe ? 'Selectionne ta cible et attaque !' : 'est en train de jouer...'}</div>
+  </div>`;
+  document.body.appendChild(pop);
+  if (isMe) sound('turn');
+  setTimeout(() => pop.classList.add('visible'), 10);
+  setTimeout(() => { pop.classList.remove('visible'); setTimeout(() => pop.remove(), 400); }, 3000);
+}
+
+// ═══════════════════════════════════
+// COMBAT RENDERING
+// ═══════════════════════════════════
+function getAllCombatants() {
+  const e = Object.values(CAMPAIGN.enemies || {});
+  const p = Object.values(CAMPAIGN.members || {});
+  return [...e, ...p].sort((a, b) => (b.initiative || b.init || 0) - (a.initiative || a.init || 0));
+}
+
+function renderAll() {
+  renderEnemySetupList();
+  renderMemberList();
+  renderCombatCards();
+  renderInitiativeBar();
+}
+
+function renderEnemySetupList() {
+  const el = document.getElementById('enemy-list'); if (!el) return;
+  const arr = Object.values(CAMPAIGN.enemies || {});
+  if (!arr.length) { el.innerHTML = '<div class="empty">Aucun ennemi</div>'; return; }
+  el.innerHTML = arr.map(e => `<div class="setup-row">
     <span class="sname">${e.name}</span>
     <span class="sstat">CA ${e.ca}</span>
     <span class="sstat">PV ${e.pvMax}</span>
-    <span class="sstat">Init +${e.init}</span>
-    <button class="btn-icon" onclick="removeEnemy('${e.id}')">X</button>
+    <button class="btn-icon" onclick="removeEnemy('${e.id}')">x</button>
   </div>`).join('');
 }
 
-function renderPlayerList(){
-  const el=document.getElementById('player-list');if(!el)return;
-  const arr=Object.values(SESSION.players||{});
-  if(!arr.length){el.innerHTML='<div class="empty">En attente de joueurs...</div>';return;}
-  el.innerHTML=arr.map(p=>`<div class="setup-row">
-    <span class="sname">◈ ${p.name}</span>
+function renderMemberList() {
+  const el = document.getElementById('member-list'); if (!el) return;
+  const arr = Object.values(CAMPAIGN.members || {});
+  if (!arr.length) { el.innerHTML = '<div class="empty">Aucun joueur</div>'; return; }
+  el.innerHTML = arr.map(p => `<div class="setup-row">
+    <span class="sname">◈ ${p.username}</span>
     <span class="sstat">${p.class||'?'}</span>
-    <span class="sstat">CA ${p.ca||'?'}</span>
-    <span class="sstat">PV ${p.pvMax||'?'}</span>
     <span class="sstat ${p.ready?'rdy-yes':'rdy-no'}">${p.ready?'PRET':'ATTENTE'}</span>
   </div>`).join('');
 }
 
-window.saveMyChar = async function(){
-  const name=ME.name;
-  const ca=parseInt(document.getElementById('p-ca').value)||10;
-  const pv=parseInt(document.getElementById('p-pv').value)||20;
-  const init=parseInt(document.getElementById('p-init').value)||0;
-  const cls=document.getElementById('p-class').value.trim()||'Aventurier';
-  await dbSet(`players/${name}`,{name,ca,pvMax:pv,pvCur:pv,init,class:cls,online:true,ready:true,dead:false,statusEffects:[],type:'ally'});
-  toast('Personnage sauvegarde!');
-  const badge=document.getElementById('saved-badge');
-  if(badge)badge.style.display='block';
-};
+function renderCombatCards() {
+  const isDM  = ME.role === 'gm';
+  const all   = getAllCombatants();
+  const phase = CAMPAIGN.meta?.phase;
+  const currentId = initiativeOrder[currentTurnIndex]?.id;
+  const isCurrentEnemy = initiativeOrder[currentTurnIndex]?.isEnemy;
 
-window.startCombat = async function(){
-  const en=SESSION.enemies||{},pl=SESSION.players||{};
-  if(!Object.keys(en).length){toast('Ajoute des ennemis');return;}
-  if(!Object.keys(pl).length){toast('Aucun joueur connecte');return;}
-  const combatId='c_'+Date.now().toString(36);
-  await dbUpd('meta',{phase:'combat',turn:1,combatId,startedAt:Date.now()});
-  const upd={};
-  Object.values(en).forEach(e=>{upd[`enemies/${e.id}/pvCur`]=e.pvMax;upd[`enemies/${e.id}/dead`]=false;upd[`enemies/${e.id}/statusEffects`]=[];});
-  Object.values(pl).forEach(p=>{upd[`players/${p.name}/pvCur`]=p.pvMax;upd[`players/${p.name}/dead`]=false;upd[`players/${p.name}/statusEffects`]=[];});
-  await update(ref(db,`sessions/${ME.sessionId}`),upd);
-  await dbSet('log',{});
-  toast('Combat lance!');
-  showDMTab('combat');
-};
+  ['comb-dm','comb-player'].forEach(elId => {
+    const el = document.getElementById(elId); if (!el) return;
+    if (!all.length) { el.innerHTML = '<div class="empty">Aucun combattant</div>'; return; }
+    el.innerHTML = all.map(c => {
+      const cid   = c.type === 'ally' ? c.username : c.id;
+      const isAtk = attackerId === cid, isTgt = targetId === cid;
+      const dead  = c.dead || c.pvCur <= 0;
+      const pct   = Math.max(0, (c.pvCur / c.pvMax) * 100);
+      const hpcol = pct > 60 ? '#3dba63' : pct > 25 ? '#e8b84b' : '#cc3333';
+      const showHP = isDM || c.type === 'ally';
+      const showCA = isDM || c.type === 'ally';
+      const estate = !isDM && c.type === 'enemy' ? (dead?'MORT':pct>75?'En forme':pct>40?'Blesse':pct>10?'Critique':'Agonie') : '';
+      const isTurnActive = (cid === currentId || c.username === currentId) && !dead;
 
-window.endCombat = async function(){
-  if(!confirm('Terminer le combat?'))return;
-  await dbUpd('meta',{phase:'ended'});
-  toast('Combat termine');
-};
+      // Player can only click enemies as target and themselves as attacker
+      const clickable = isDM ? true : (c.type==='enemy' || c.username===ME.username);
+      const isCurrent = isTurnActive;
 
-window.quitCombat = async function(){
-  if(!confirm('Quitter le combat?'))return;
-  await dbUpd('meta',{phase:'lobby'});
-  toast('Combat quitte');
-};
-
-window.nextTurn = async function(){
-  const cur=(SESSION.meta?.turn||1)+1;
-  await dbSet('meta/turn',cur);
-  toast('Tour '+cur);
-};
-
-window.joinCombat = function(){
-  document.getElementById('combat-popup').classList.remove('show');
-  showPlayerTab('combat');
-};
-
-function getAllCombatants(){
-  const e=Object.values(SESSION.enemies||{});
-  const p=Object.values(SESSION.players||{});
-  return [...e,...p].sort((a,b)=>(b.init||0)-(a.init||0));
-}
-
-function renderCombatCards(){
-  const isDM=ME.role==='dm';
-  const all=getAllCombatants();
-  ['comb-dm','comb-player'].forEach(id=>{
-    const el=document.getElementById(id);if(!el)return;
-    if(!all.length){el.innerHTML='<div class="empty">Aucun combattant</div>';return;}
-    el.innerHTML=all.map(c=>{
-      const cid=c.type==='ally'?c.name:c.id;
-      const isAtk=attackerId===cid, isTgt=targetId===cid;
-      const dead=c.dead||c.pvCur<=0;
-      const pct=Math.max(0,(c.pvCur/c.pvMax)*100);
-      const hpcol=pct>60?'#3dba63':pct>25?'#e8b84b':'#cc3333';
-      const showHP=isDM||c.type==='ally';
-      const showCA=isDM||c.type==='ally';
-      const estate=!isDM&&c.type==='enemy'?(dead?'X MORT':pct>75?'En forme':pct>40?'Blesse':pct>10?'Critique':'Agonie'):'';
-      return `<div class="ccard ${c.type} ${isAtk?'is-atk':''} ${isTgt?'is-tgt':''} ${dead?'is-dead':''}" onclick="ccClick('${cid}','${c.type}')">
+      return `<div class="ccard ${c.type} ${isAtk?'is-atk':''} ${isTgt?'is-tgt':''} ${dead?'is-dead':''} ${isCurrent?'is-current-turn':''}" 
+                   ${clickable?`onclick="ccClick('${cid}','${c.type}')"`:''}
+                   style="${!clickable&&c.type==='ally'&&c.username!==ME.username?'opacity:.6;cursor:default':''}"
+              >
         <div class="ctop">
-          <div><span class="tbdg ${c.type}">${c.type==='ally'?'ALLIE':'ENNEMI'}</span> <span class="cname">${dead?'X ':''}${c.name}</span></div>
-          <span class="catag">${showCA?'CA '+c.ca:'CA ?'}</span>
+          <div>
+            <span class="tbdg ${c.type}">${c.type==='ally'?'ALLIE':'ENNEMI'}</span>
+            <span class="cname">${dead?'x ':''}${c.name||c.username}</span>
+            ${isCurrent ? '<span class="turn-marker">JOUE</span>' : ''}
+          </div>
+          <span class="catag">${showCA?'CA '+(c.ca||'?'):'CA ?'}</span>
         </div>
         <div class="hptr"><div class="hpfl" style="width:${pct}%;background:${hpcol}"></div></div>
         <div class="hprow">${showHP?c.pvCur+' / '+c.pvMax+' PV':estate}</div>
@@ -270,222 +638,345 @@ function renderCombatCards(){
   });
 }
 
-window.ccClick = function(cid,type){
-  if(!attackerId){attackerId=cid;}
-  else if(attackerId===cid){attackerId=null;}
-  else if(!targetId){targetId=cid;}
-  else if(targetId===cid){targetId=null;}
-  else{targetId=cid;}
+window.ccClick = function(cid, type) {
+  // Players: self = attacker, enemy = target
+  if (ME.role !== 'gm') {
+    if (type === 'ally') {
+      attackerId = cid;
+    } else {
+      targetId = cid;
+    }
+  } else {
+    if (!attackerId) attackerId = cid;
+    else if (attackerId === cid) attackerId = null;
+    else if (!targetId) targetId = cid;
+    else if (targetId === cid) targetId = null;
+    else targetId = cid;
+  }
   renderCombatCards();
   refreshAtkPanel();
   computeResult();
 };
 
-function getCombatant(cid){
-  return getAllCombatants().find(c=>c.id===cid||c.name===cid);
+function getCombatant(cid) {
+  return getAllCombatants().find(c => c.id === cid || c.username === cid);
 }
 
-function renderInitiative(){
-  const all=getAllCombatants();
-  ['init-dm','init-player'].forEach(id=>{
-    const el=document.getElementById(id);if(!el)return;
-    if(!all.length){el.innerHTML='<div class="empty">Aucun combattant</div>';return;}
-    el.innerHTML=all.map((c,i)=>`<div class="irow ${c.dead?'idead':''}">
-      <span class="inum">${i+1}</span>
-      <span class="iname">${c.dead?'X ':''}${c.name}</span>
-      <span class="ival ${c.type}">+${c.init||0}</span>
-    </div>`).join('');
-  });
+// ═══════════════════════════════════
+// ATTACK PANEL
+// ═══════════════════════════════════
+function refreshAtkPanel() {
+  const atk = getCombatant(attackerId), tgt = getCombatant(targetId);
+  ['atklbl','atklbl-p'].forEach(id => { const e=document.getElementById(id); if(e) e.textContent=atk?atk.name||atk.username:'- Aucun -'; });
+  ['tgtlbl','tgtlbl-p'].forEach(id => { const e=document.getElementById(id); if(e) e.textContent=tgt?tgt.name||tgt.username:'- Aucun -'; });
+  const ci = document.getElementById('tgt-ca');
+  if (ci) ci.textContent = tgt && ME.role==='gm' ? 'CA '+tgt.ca : '';
 }
 
-function refreshAtkPanel(){
-  const atk=getCombatant(attackerId),tgt=getCombatant(targetId);
-  ['atklbl','atklbl-p'].forEach(id=>{const e=document.getElementById(id);if(e)e.textContent=atk?atk.name:'- Aucun -';});
-  ['tgtlbl','tgtlbl-p'].forEach(id=>{const e=document.getElementById(id);if(e)e.textContent=tgt?tgt.name:'- Aucun -';});
-  const ci=document.getElementById('tgt-ca');
-  if(ci)ci.textContent=tgt&&ME.role==='dm'?'CA '+tgt.ca:'';
-}
-
-window.selPart2 = function(k){
-  selPart=k;
-  document.querySelectorAll('.pbtn').forEach(b=>b.classList.remove('sel','selc'));
-  const btn=document.getElementById('pb-'+k);if(btn)btn.classList.add(PARTS[k].crit?'selc':'sel');
-  document.querySelectorAll('.svgp').forEach(s=>s.classList.remove('svgsel'));
-  const sv=document.getElementById('sv-'+k);if(sv)sv.classList.add('svgsel');
+window.selPart = function(k) {
+  selPart = k;
+  document.querySelectorAll('.pbtn').forEach(b => b.classList.remove('sel','selc'));
+  document.getElementById('pb-'+k)?.classList.add(PARTS[k].crit ? 'selc' : 'sel');
+  document.querySelectorAll('.svgp').forEach(s => s.classList.remove('svgsel'));
+  document.getElementById('sv-'+k)?.classList.add('svgsel');
   computeResult();
 };
 
-window.computeResult = function(){
-  const d20=parseInt(document.getElementById('inp-d20')?.value);
-  const dmgR=parseInt(document.getElementById('inp-dmg')?.value);
-  if(!attackerId||!targetId)return;
-  const atk=getCombatant(attackerId),tgt=getCombatant(targetId);
-  if(!atk||!tgt)return;
-  const part=PARTS[selPart];
-  const isCrit=d20===20,isFumble=d20===1;
-  const req=(tgt.ca||10)+part.dcMod;
-  const isHit=!isNaN(d20)&&(isCrit||(!isFumble&&d20>=req));
-  let dmg=0;
-  if(isHit&&!isNaN(dmgR))dmg=Math.max(0,Math.round(dmgR*part.mult*(isCrit?2:1)));
-  const hpAfter=Math.max(0,(tgt.pvCur||0)-dmg);
-  const wouldKill=isHit&&(hpAfter<=0||(part.instantKill&&isCrit)||(part.killPct>0&&isCrit&&tgt.pvCur<=(tgt.pvMax||1)*part.killPct));
-  const rtype=isFumble?'fumble':!isHit?'miss':wouldKill?'kill':isCrit?'crit':'hit';
-  const cols={hit:'#3dba63',miss:'#777',crit:'#e8b84b',kill:'#cc3333',fumble:'#cc3333'};
-  const labs={hit:'TOUCHE',miss:'RATE',crit:'CRITIQUE!',kill:'COUP FATAL',fumble:'FUMBLE'};
-  const rbox=document.getElementById('result-box');
-  if(rbox){
-    if(isNaN(d20)){rbox.innerHTML='<span class="dim">Entre ton jet de d20</span>';}
-    else if(!isHit){rbox.innerHTML=`<strong style="color:#777">RATE</strong> - ${d20} vs CA ${req} (CA ${tgt.ca||'?'}+${part.dcMod})`;}
-    else{
-      let h=`<strong style="color:${cols[rtype]}">${labs[rtype]}</strong>`;
-      if(!isNaN(dmgR))h+=` - <strong style="color:${cols[rtype]}">${dmg} degats</strong>`;
-      if(isHit&&!isNaN(dmgR))h+=`<br><span class="dim">${tgt.name}: ${tgt.pvCur} → ${hpAfter} PV</span>`;
-      if(isCrit)h+=`<br><em style="color:var(--purple)">${part.fx}</em>`;
-      if(wouldKill)h+=`<br><strong style="color:var(--red)">${part.kfx}</strong>`;
-      rbox.innerHTML=h;
+window.computeResult = function() {
+  const d20  = parseInt(document.getElementById('inp-d20')?.value);
+  const dmgR = parseInt(document.getElementById('inp-dmg')?.value);
+  if (!attackerId || !targetId) return;
+  const atk = getCombatant(attackerId), tgt = getCombatant(targetId);
+  if (!atk || !tgt) return;
+  const part     = PARTS[selPart];
+  const isCrit   = d20 === 20, isFumble = d20 === 1;
+  const req      = (tgt.ca || 10) + part.dcMod;
+  const isHit    = !isNaN(d20) && (isCrit || (!isFumble && d20 >= req));
+  let   dmg      = 0;
+  if (isHit && !isNaN(dmgR)) dmg = Math.max(0, Math.round(dmgR * part.mult * (isCrit ? 2 : 1)));
+  const hpAfter  = Math.max(0, (tgt.pvCur || 0) - dmg);
+  const wouldKill= isHit && (hpAfter <= 0 || (part.instantKill && isCrit) || (part.killPct > 0 && isCrit && tgt.pvCur <= (tgt.pvMax||1) * part.killPct));
+  const rtype    = isFumble?'fumble':!isHit?'miss':wouldKill?'kill':isCrit?'crit':'hit';
+  const cols     = {hit:'#3dba63',miss:'#666',crit:'#e8b84b',kill:'#cc3333',fumble:'#cc3333'};
+  const labs     = {hit:'TOUCHE',miss:'RATE',crit:'CRITIQUE !',kill:'COUP FATAL',fumble:'FUMBLE'};
+
+  const rbox = document.getElementById('result-box');
+  if (rbox) {
+    if (isNaN(d20)) { rbox.innerHTML = '<span class="dim">Entre ton jet de d20</span>'; }
+    else if (!isHit) { rbox.innerHTML = `<strong style="color:#666">RATE</strong> - ${d20} vs CA ${req}`; }
+    else {
+      let h = `<strong style="color:${cols[rtype]}">${labs[rtype]}</strong>`;
+      if (!isNaN(dmgR)) h += ` - <strong style="color:${cols[rtype]}">${dmg} degats</strong>`;
+      if (isHit && !isNaN(dmgR)) h += `<br><span class="dim">${tgt.name||tgt.username}: ${tgt.pvCur} → ${hpAfter} PV</span>`;
+      if (isCrit)     h += `<br><em style="color:var(--purple)">${part.fx}</em>`;
+      if (wouldKill)  h += `<br><strong style="color:var(--red)">${part.kfx}</strong>`;
+      rbox.innerHTML = h;
     }
   }
-  pendingAtk={d20,dmgR,dmg,isHit,isCrit,isFumble,wouldKill,rtype,req,hpAfter,part,atk,tgt};
-  const btn=document.getElementById('confirm-btn');
-  if(btn)btn.disabled=isNaN(d20)||isNaN(dmgR)||d20<1||d20>20;
+  pendingAtk = { d20, dmgR, dmg, isHit, isCrit, isFumble, wouldKill, rtype, req, hpAfter, part, atk, tgt };
+  const btn = document.getElementById('confirm-btn');
+  if (btn) btn.disabled = isNaN(d20) || isNaN(dmgR) || d20 < 1 || d20 > 20;
 };
 
-window.confirmAttack = async function(){
-  if(!pendingAtk)return;
-  const p=pendingAtk,turn=SESSION.meta?.turn||1;
-  const tp=p.tgt.type==='ally'?`players/${p.tgt.name}`:`enemies/${p.tgt.id}`;
-  const upd={};
-  if(p.isHit){
-    upd[`${tp}/pvCur`]=p.hpAfter;
-    if(p.wouldKill){upd[`${tp}/dead`]=true;upd[`${tp}/statusEffects`]=['MORT'];}
-    else if(p.isCrit&&p.part.fx){
-      const cur=p.tgt.statusEffects||[];
-      const sh=p.part.fx.split(' (')[0];
-      if(!cur.includes(sh))upd[`${tp}/statusEffects`]=[...cur,sh];
+window.confirmAttack = async function() {
+  if (!pendingAtk) return;
+  const p = pendingAtk, turn = CAMPAIGN.meta?.turn || 1;
+  const tp = p.tgt.type === 'ally' ? `members/${p.tgt.username}` : `enemies/${p.tgt.id}`;
+  const upd = {};
+  if (p.isHit) {
+    upd[`${tp}/pvCur`] = p.hpAfter;
+    if (p.wouldKill) {
+      upd[`${tp}/dead`]          = true;
+      upd[`${tp}/statusEffects`] = ['MORT'];
+      sound('kill');
+      showBloodSplatter();
+    } else {
+      sound(p.isCrit ? 'crit' : 'hit');
+      if (p.isCrit && p.part.fx) {
+        const cur = p.tgt.statusEffects || [];
+        const sh  = p.part.fx.split(' (')[0];
+        if (!cur.includes(sh)) upd[`${tp}/statusEffects`] = [...cur, sh];
+      }
     }
+  } else {
+    sound('miss');
   }
-  const entry={turn,by:ME.name,atk:p.atk.name,tgt:p.tgt.name,part:p.part.name,d20:p.d20,dmg:p.dmg,type:p.rtype,hpLeft:p.hpAfter,hpMax:p.tgt.pvMax,ts:Date.now()};
-  await update(ref(db,`sessions/${ME.sessionId}`),upd);
-  await dbPush('log',entry);
-  pendingAtk=null;attackerId=null;targetId=null;
-  const d=document.getElementById('inp-d20');if(d)d.value='';
-  const g=document.getElementById('inp-dmg');if(g)g.value='';
-  const rb=document.getElementById('result-box');
-  if(rb)rb.innerHTML='<span class="dim">Selectionne attaquant → cible → partie → entre les des</span>';
-  const cb=document.getElementById('confirm-btn');if(cb)cb.disabled=true;
-  renderCombatCards();refreshAtkPanel();
-  toast(p.wouldKill?'X '+p.tgt.name+' est mort!':p.isHit?p.dmg+' degats sur '+p.tgt.name:'Attaque ratee');
+
+  // Update attacker stats
+  const atkPath = p.atk.type === 'ally' ? `members/${p.atk.username}/stats` : null;
+  if (atkPath) {
+    const curStats = p.atk.stats || {};
+    const newStats = { ...curStats };
+    newStats.hits       = (newStats.hits||0) + (p.isHit?1:0);
+    newStats.misses     = (newStats.misses||0) + (!p.isHit?1:0);
+    newStats.crits      = (newStats.crits||0) + (p.isCrit?1:0);
+    newStats.kills      = (newStats.kills||0) + (p.wouldKill?1:0);
+    newStats.totalDmg   = (newStats.totalDmg||0) + p.dmg;
+    newStats.bestHit    = Math.max(newStats.bestHit||0, p.dmg);
+    upd[atkPath] = newStats;
+  }
+  // Update target stats if player
+  const tgtPath = p.tgt.type === 'ally' ? `members/${p.tgt.username}/stats` : null;
+  if (tgtPath && p.isHit) {
+    const cs = p.tgt.stats || {};
+    upd[`${tgtPath}/totalDmgTaken`] = (cs.totalDmgTaken||0) + p.dmg;
+  }
+
+  const entry = { turn, by: ME.username, atk: p.atk.name||p.atk.username, tgt: p.tgt.name||p.tgt.username, part: p.part.name, d20: p.d20, dmg: p.dmg, type: p.rtype, hpLeft: p.hpAfter, hpMax: p.tgt.pvMax, ts: Date.now() };
+  await update(cRef(''), upd);
+  await dbPush('log', entry);
+
+  // Advance turn
+  await advanceTurn();
+
+  // Reset UI
+  pendingAtk = null; attackerId = null; targetId = null;
+  const d = document.getElementById('inp-d20'); if (d) d.value = '';
+  const g = document.getElementById('inp-dmg'); if (g) g.value = '';
+  const rb= document.getElementById('result-box');
+  if (rb) rb.innerHTML = '<span class="dim">Selectionne ta cible et entre les des</span>';
+  const cb= document.getElementById('confirm-btn'); if (cb) cb.disabled = true;
+  renderCombatCards(); refreshAtkPanel();
+
+  if (p.wouldKill) toast('x ' + (p.tgt.name||p.tgt.username) + ' est mort !');
+  else if (p.isHit) toast(p.dmg + ' degats sur ' + (p.tgt.name||p.tgt.username));
+  else toast('Attaque ratee !');
 };
 
-function renderLog(){
-  const log=SESSION.log||{};
-  const arr=Object.values(log).sort((a,b)=>a.ts-b.ts);
-  const isDM=ME.role==='dm';
-  const cols={hit:'#3dba63',miss:'#555',crit:'#e8b84b',kill:'#cc3333',fumble:'#cc3333'};
-  const icons={hit:'[HIT]',miss:'[MISS]',crit:'[CRIT]',kill:'[KILL]',fumble:'[FUMBLE]'};
-  ['log-dm','log-player'].forEach(lid=>{
-    const el=document.getElementById(lid);if(!el)return;
-    if(!arr.length){el.innerHTML='<div class="empty">Aucune action</div>';return;}
-    let lt=0;
-    el.innerHTML=arr.map(e=>{
-      let hdr='';
-      if(e.turn!==lt){lt=e.turn;hdr=`<div class="lturn">TOUR ${e.turn}</div>`;}
+window.skipTurn = async function() {
+  await advanceTurn();
+  toast('Tour passe');
+};
+
+async function advanceTurn() {
+  let order = initiativeOrder.filter(c => !isCombatantDead(c.id, c.isEnemy));
+  if (!order.length) { await endCombat(); return; }
+
+  let nextIndex = (currentTurnIndex + 1) % initiativeOrder.length;
+  // Skip dead combatants
+  let safety = 0;
+  while (isCombatantDead(initiativeOrder[nextIndex]?.id, initiativeOrder[nextIndex]?.isEnemy) && safety < 20) {
+    nextIndex = (nextIndex + 1) % initiativeOrder.length;
+    safety++;
+  }
+
+  let newTurn = CAMPAIGN.meta?.turn || 1;
+  let newRound = CAMPAIGN.combatState?.round || 1;
+  if (nextIndex <= currentTurnIndex) { newTurn++; newRound++; }
+
+  await update(cRef('combatState'), { currentIndex: nextIndex, round: newRound });
+  await dbSet('meta/turn', newTurn);
+  currentTurnIndex = nextIndex;
+  lastTurnName = '';
+  checkMyTurn();
+  renderInitiativeBar();
+}
+
+function showBloodSplatter() {
+  const splat = document.createElement('div');
+  splat.className = 'blood-splatter';
+  splat.innerHTML = Array.from({length:12},(_,i)=>`<div class="blood-drop" style="--a:${i*30}deg;--d:${50+Math.random()*80}px"></div>`).join('');
+  document.body.appendChild(splat);
+  setTimeout(() => splat.remove(), 1200);
+}
+
+// ═══════════════════════════════════
+// END / QUIT COMBAT
+// ═══════════════════════════════════
+window.endCombat = async function() {
+  if (ME.role !== 'gm') return;
+  if (!confirm('Terminer le combat ?')) return;
+  await dbUpd('meta', { phase: 'ended' });
+  sound('victory');
+  toast('Combat termine !');
+};
+
+window.quitCombatScreen = function() {
+  if (ME.role === 'gm') showDMTab('setup');
+  else showPlayerTab('lobby');
+};
+
+// ═══════════════════════════════════
+// LOG
+// ═══════════════════════════════════
+function renderLog() {
+  const log = CAMPAIGN.log || {};
+  const arr = Object.values(log).sort((a,b) => a.ts - b.ts);
+  const isDM = ME.role === 'gm';
+  const cols = {hit:'#3dba63',miss:'#555',crit:'#e8b84b',kill:'#cc3333',fumble:'#cc3333'};
+  const icons= {hit:'[HIT]',miss:'[MISS]',crit:'[CRIT]',kill:'[KILL]',fumble:'[FUMBLE]'};
+  ['log-dm','log-player'].forEach(lid => {
+    const el = document.getElementById(lid); if (!el) return;
+    if (!arr.length) { el.innerHTML = '<div class="empty">Aucune action</div>'; return; }
+    let lt = 0;
+    el.innerHTML = arr.map(e => {
+      let hdr = '';
+      if (e.turn !== lt) { lt = e.turn; hdr = `<div class="lturn">TOUR ${e.turn}</div>`; }
       return `${hdr}<div class="lentry l${e.type}">
         <span style="color:${cols[e.type]||'#888'}">${icons[e.type]||'?'}</span>
         <strong>${e.atk}</strong> → <strong>${e.tgt}</strong> [${e.part}]
         ${e.type!=='miss'&&e.type!=='fumble'?`<strong style="color:${cols[e.type]}"> ${e.dmg} dmg</strong>`:'<span class="dim"> rate</span>'}
         ${isDM?`<span class="dim"> PV ${e.hpLeft}/${e.hpMax}</span>`:''}
-        ${e.type==='kill'?'<span style="color:var(--red)"> X MORT</span>':''}
+        ${e.type==='kill'?'<span style="color:var(--red)"> x MORT</span>':''}
       </div>`;
     }).join('');
-    el.scrollTop=el.scrollHeight;
+    el.scrollTop = el.scrollHeight;
   });
 }
 
-function playChatSound(){
-  try{
-    const ctx=new(window.AudioContext||window.webkitAudioContext)();
-    const o=ctx.createOscillator(),g=ctx.createGain();
-    o.connect(g);g.connect(ctx.destination);
-    o.frequency.setValueAtTime(880,ctx.currentTime);
-    o.frequency.exponentialRampToValueAtTime(440,ctx.currentTime+0.1);
-    g.gain.setValueAtTime(0.12,ctx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.2);
-    o.start();o.stop(ctx.currentTime+0.2);
-  }catch(e){}
-}
+// ═══════════════════════════════════
+// PLAYER PROFILE / STATS
+// ═══════════════════════════════════
+window.showProfile = async function() {
+  showPlayerTab('profile');
+  const me = CAMPAIGN.members?.[ME.username];
+  if (!me) return;
+  const s = me.stats || {};
+  const hitrate = (s.hits||0)+(s.misses||0) > 0 ? Math.round((s.hits||0)/((s.hits||0)+(s.misses||0))*100) : 0;
+  const kda = ((s.kills||0) / Math.max(1, me.pvMax - (me.pvCur||me.pvMax))) * 100;
+  document.getElementById('profile-content').innerHTML = `
+    <div class="profile-hero">
+      <div class="profile-avatar">${(me.username||'?')[0].toUpperCase()}</div>
+      <div class="profile-name">${me.username}</div>
+      <div class="profile-class">${me.class||'Aventurier'}</div>
+    </div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-num" style="color:var(--greenB)">${s.hits||0}</div><div class="stat-lbl">TOUCHES</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:var(--red)">${s.misses||0}</div><div class="stat-lbl">RATES</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:var(--gold2)">${s.crits||0}</div><div class="stat-lbl">CRITIQUES</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:var(--red)">${s.kills||0}</div><div class="stat-lbl">ELIMINATIONS</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:var(--gold)">${s.totalDmg||0}</div><div class="stat-lbl">DMG INFLIGES</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:var(--purple)">${s.totalDmgTaken||0}</div><div class="stat-lbl">DMG RECUS</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:var(--gold2)">${s.bestHit||0}</div><div class="stat-lbl">MEILLEUR COUP</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:var(--blueB)">${hitrate}%</div><div class="stat-lbl">PRECISION</div></div>
+    </div>
+    <div class="hp-display">
+      <div class="hp-label">POINTS DE VIE</div>
+      <div class="hptr" style="height:12px"><div class="hpfl" style="width:${Math.max(0,(me.pvCur/me.pvMax)*100)}%;background:${me.pvCur/me.pvMax>0.5?'#3dba63':'#cc3333'}"></div></div>
+      <div style="text-align:center;margin-top:4px;font-size:11px;color:var(--dim)">${me.pvCur||0} / ${me.pvMax||0}</div>
+    </div>`;
+};
 
-function renderChat(){
-  const msgs=SESSION.chat||{};
-  const arr=Object.values(msgs).sort((a,b)=>a.ts-b.ts);
-  ['chat-dm','chat-p'].forEach(id=>{
-    const el=document.getElementById(id);if(!el)return;
-    el.innerHTML=arr.map(m=>{
-      const isMe=m.from===ME.name,isDMmsg=m.role==='dm';
+// ═══════════════════════════════════
+// CHAT
+// ═══════════════════════════════════
+function renderChat() {
+  const msgs = CAMPAIGN.chat || {};
+  const arr  = Object.values(msgs).sort((a,b) => a.ts - b.ts);
+  ['chat-dm','chat-p'].forEach(id => {
+    const el = document.getElementById(id); if (!el) return;
+    el.innerHTML = arr.map(m => {
+      const isMe = m.from === ME.username, isDMmsg = m.role === 'gm';
       return `<div class="cmsg ${isMe?'cme':'cother'}">
-        <span class="cfrom ${isDMmsg?'cdm':''}">${isDMmsg?'DM: ':m.from+': '}</span>
+        <span class="cfrom ${isDMmsg?'cdm':''}">${isDMmsg?'GM':'◈ '+m.from}</span>
         <span class="ctxt">${m.msg}</span>
       </div>`;
     }).join('');
-    el.scrollTop=el.scrollHeight;
+    el.scrollTop = el.scrollHeight;
   });
-  const badge=document.getElementById('chat-badge');
-  if(badge&&!chatOpen)badge.style.display='flex';
+  const badge = document.getElementById('chat-badge');
+  if (badge && !chatOpen) badge.style.display = 'flex';
 }
 
-window.sendChat = async function(){
-  const iid=ME.role==='dm'?'ci-dm':'ci-p';
-  const el=document.getElementById(iid);if(!el)return;
-  const msg=el.value.trim();if(!msg)return;
-  await dbPush('chat',{from:ME.name,role:ME.role,msg,ts:Date.now()});
-  el.value='';
+window.sendChat = async function() {
+  const iid = ME.role === 'gm' ? 'ci-dm' : 'ci-p';
+  const el  = document.getElementById(iid); if (!el) return;
+  const msg = el.value.trim(); if (!msg) return;
+  await dbPush('chat', { from: ME.username, role: ME.role, msg, ts: Date.now() });
+  el.value = '';
 };
 
-window.chatKey = function(e){if(e.key==='Enter')sendChat();};
+window.chatKey = function(e) { if (e.key === 'Enter') sendChat(); };
 
-window.toggleChat = function(){
-  chatOpen=!chatOpen;
-  const body=document.getElementById('chat-body');
-  if(body)body.style.display=chatOpen?'flex':'none';
-  const btn=document.getElementById('chat-tog');
-  if(btn)btn.textContent=chatOpen?'▼':'▲';
-  const badge=document.getElementById('chat-badge');
-  if(badge)badge.style.display='none';
+window.toggleChat = function() {
+  chatOpen = !chatOpen;
+  const body  = document.getElementById('chat-body');
+  if (body) body.style.display = chatOpen ? 'flex' : 'none';
+  const btn   = document.getElementById('chat-tog');
+  if (btn) btn.textContent = chatOpen ? '▼' : '▲';
+  const badge = document.getElementById('chat-badge');
+  if (badge) badge.style.display = 'none';
 };
 
-window.showDMTab = function(t){
-  document.querySelectorAll('.dtab').forEach(b=>b.classList.remove('active'));
-  document.querySelectorAll('.dpnl').forEach(p=>p.classList.remove('active'));
+// ═══════════════════════════════════
+// TAB NAV
+// ═══════════════════════════════════
+window.showDMTab = function(t) {
+  document.querySelectorAll('.dtab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.dpnl').forEach(p => p.classList.remove('active'));
   document.getElementById('dt-'+t)?.classList.add('active');
   document.getElementById('dp-'+t)?.classList.add('active');
 };
 
-window.showPlayerTab = function(t){
-  document.querySelectorAll('.ptab').forEach(b=>b.classList.remove('active'));
-  document.querySelectorAll('.ppnl').forEach(p=>p.classList.remove('active'));
+window.showPlayerTab = function(t) {
+  document.querySelectorAll('.ptab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.ppnl').forEach(p => p.classList.remove('active'));
   document.getElementById('pt-'+t)?.classList.add('active');
   document.getElementById('pp-'+t)?.classList.add('active');
 };
 
-window.toast = function(msg){
-  const el=document.getElementById('toast');
-  el.textContent=msg;el.classList.add('show');
-  setTimeout(()=>el.classList.remove('show'),2800);
+// ═══════════════════════════════════
+// TOAST
+// ═══════════════════════════════════
+window.toast = function(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2800);
 };
 
-const saved=localStorage.getItem('aethon_me');
-if(saved){
-  try{
-    const s=JSON.parse(saved);
-    if(s.name)document.getElementById('inp-name').value=s.name;
-    if(s.sessionId)document.getElementById('inp-sid').value=s.sessionId;
-  }catch(e){}
+// ═══════════════════════════════════
+// AUTO-LOGIN
+// ═══════════════════════════════════
+const saved = localStorage.getItem('aethon_user');
+if (saved) {
+  try {
+    const s = JSON.parse(saved);
+    document.getElementById('auth-user').value = s.username || '';
+    document.getElementById('auth-pass').value = s.password || '';
+  } catch(e) {}
 }
 
-document.addEventListener('DOMContentLoaded',()=>{
-  selPart2('torse');
-});
-
+document.addEventListener('DOMContentLoaded', () => selPart('torse'));
 </script>
 <style>
 :root{
@@ -498,47 +989,74 @@ document.addEventListener('DOMContentLoaded',()=>{
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;background:var(--bg);color:var(--text);font-family:'Share Tech Mono',monospace;overflow-x:hidden}
-body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.06) 2px,rgba(0,0,0,.06) 4px);pointer-events:none;z-index:9990}
+body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.06) 2px,rgba(0,0,0,.06) 4px);pointer-events:none;z-index:9000}
+.screen{display:none;flex-direction:column;min-height:100vh}.screen.active{display:flex}
 
-.screen{display:none;flex-direction:column;min-height:100vh}
-.screen.active{display:flex}
-
-/* LANDING */
-#screen-landing{align-items:center;justify-content:center;padding:40px 20px;background:radial-gradient(ellipse at center,#1a1208 0%,#08080b 70%)}
-.lbox{background:var(--panel);border:1px solid var(--gold);border-radius:8px;padding:44px;max-width:460px;width:100%;box-shadow:0 0 80px rgba(197,151,58,.15)}
-.logo{font-family:'Cinzel',serif;font-size:46px;font-weight:900;color:var(--gold);text-align:center;letter-spacing:8px;text-shadow:0 0 40px rgba(197,151,58,.6);margin-bottom:4px}
-.logosub{font-size:9px;color:var(--dim);letter-spacing:5px;text-align:center;margin-bottom:32px}
-.lsep{height:1px;background:linear-gradient(90deg,transparent,var(--goldD),transparent);margin:20px 0}
+/* AUTH */
+#screen-auth{align-items:center;justify-content:center;padding:40px 20px;background:radial-gradient(ellipse at center,#1a1208 0%,#08080b 70%)}
+.abox{background:var(--panel);border:1px solid var(--gold);border-radius:8px;padding:44px;max-width:420px;width:100%;box-shadow:0 0 80px rgba(197,151,58,.15)}
+.logo{font-family:'Cinzel',serif;font-size:48px;font-weight:900;color:var(--gold);text-align:center;letter-spacing:8px;text-shadow:0 0 40px rgba(197,151,58,.6);margin-bottom:4px}
+.logosub{font-size:9px;color:var(--dim);letter-spacing:5px;text-align:center;margin-bottom:8px}
+.lsep{height:1px;background:linear-gradient(90deg,transparent,var(--goldD),transparent);margin:16px 0}
+.authtitle{font-family:'Cinzel',serif;font-size:14px;letter-spacing:3px;color:var(--gold);text-align:center;margin-bottom:20px}
 .f{margin-bottom:14px}
 .f label{display:block;font-size:9px;letter-spacing:2px;color:var(--dim);margin-bottom:5px;text-transform:uppercase}
 .f input,.f select{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'Share Tech Mono',monospace;font-size:14px;padding:10px 14px;border-radius:3px;outline:none;transition:border-color .2s}
 .f input:focus{border-color:var(--gold)}
-.brow{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px}
-.btn{padding:11px 20px;font-family:'Cinzel',serif;font-size:11px;letter-spacing:2px;cursor:pointer;border:1px solid;border-radius:2px;transition:all .2s;text-transform:uppercase;background:transparent;text-align:center}
-.btn-gold{border-color:var(--gold);color:var(--gold)}
-.btn-gold:hover{background:var(--gold);color:var(--bg);box-shadow:0 0 20px rgba(197,151,58,.4)}
-.btn-red{border-color:var(--red);color:#ff7777;background:rgba(204,51,51,.08)}
-.btn-red:hover{background:rgba(204,51,51,.25)}
-.btn-green{border-color:var(--greenB);color:#fff;background:var(--green)}
-.btn-green:hover{background:var(--greenB)}
-.btn-gray{border-color:var(--border);color:var(--dim)}
-.btn-gray:hover{border-color:var(--brd2);color:var(--mid)}
-.btn-sm{padding:6px 14px;font-size:9px}
-.btn-blk{width:100%;margin-top:8px}
+.btn{padding:11px 20px;font-family:'Cinzel',serif;font-size:11px;letter-spacing:2px;cursor:pointer;border:1px solid;border-radius:2px;transition:all .2s;text-transform:uppercase;background:transparent;text-align:center;display:block;width:100%;margin-bottom:8px}
+.btn-gold{border-color:var(--gold);color:var(--gold)}.btn-gold:hover{background:var(--gold);color:var(--bg);box-shadow:0 0 20px rgba(197,151,58,.4)}
+.btn-red{border-color:var(--red);color:#ff7777;background:rgba(204,51,51,.08)}.btn-red:hover{background:rgba(204,51,51,.25)}
+.btn-green{border-color:var(--greenB);color:#fff;background:var(--green)}.btn-green:hover{background:var(--greenB)}
+.btn-gray{border-color:var(--border);color:var(--dim)}.btn-gray:hover{border-color:var(--brd2);color:var(--mid)}
+.btn-sm{padding:5px 12px;font-size:9px;width:auto;display:inline-block;margin-bottom:0}
+.btn-icon{background:none;border:none;color:var(--dim);cursor:pointer;font-size:13px;padding:2px 6px}.btn-icon:hover{color:var(--red)}
 .btn:disabled{opacity:.4;cursor:not-allowed}
-.btn-icon{background:none;border:none;color:var(--dim);cursor:pointer;font-size:13px;padding:2px 6px}
-.btn-icon:hover{color:var(--red)}
-.lnote{font-size:10px;color:var(--dim);margin-top:18px;line-height:1.7;border-top:1px solid var(--border);padding-top:14px}
-.lnote a{color:var(--gold);text-decoration:none}
+.auth-toggle{text-align:center;font-size:10px;color:var(--gold);cursor:pointer;margin-top:6px;text-decoration:underline}
+
+/* CAMPAIGNS */
+#screen-campaigns{flex-direction:column}
+.camp-hdr{background:var(--bg2);border-bottom:2px solid var(--gold);padding:14px 28px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.camp-hdr-title{font-family:'Cinzel',serif;font-size:18px;font-weight:900;color:var(--gold);letter-spacing:4px}
+.camp-body{flex:1;padding:28px;overflow-y:auto;max-width:900px;width:100%;margin:0 auto}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:18px;position:relative;margin-bottom:14px}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--gold),transparent);opacity:.25}
+.ctitle{font-family:'Cinzel',serif;font-size:10px;letter-spacing:3px;color:var(--gold);margin-bottom:12px;padding-bottom:7px;border-bottom:1px solid var(--border)}
+.camp-card{background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:14px;margin-bottom:8px;cursor:pointer;transition:all .2s}
+.camp-card:hover{border-color:var(--gold);box-shadow:0 0 12px rgba(197,151,58,.1)}
+.camp-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.camp-name{font-family:'Cinzel',serif;font-size:14px;color:var(--text)}
+.camp-role{font-size:9px;padding:2px 8px;border-radius:2px;letter-spacing:1px}
+.camp-role.gm{background:rgba(197,151,58,.2);color:var(--gold);border:1px solid var(--goldD)}
+.camp-role.player{background:rgba(68,136,238,.2);color:var(--blueB);border:1px solid var(--blue)}
+.camp-sub{font-size:10px;color:var(--dim)}
+.app-row{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;margin-bottom:6px}
+.app-name{flex:1;font-family:'Cinzel',serif;font-size:12px}
 
 /* HEADER */
-.hdr{background:var(--bg2);border-bottom:2px solid var(--gold);padding:11px 24px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;box-shadow:0 4px 30px rgba(197,151,58,.12);position:sticky;top:0;z-index:200}
-.hdrtitle{font-family:'Cinzel',serif;font-size:17px;font-weight:900;color:var(--gold);letter-spacing:4px}
+.hdr{background:var(--bg2);border-bottom:2px solid var(--gold);padding:11px 24px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;position:sticky;top:0;z-index:300;box-shadow:0 4px 30px rgba(197,151,58,.1)}
+.hdrtitle{font-family:'Cinzel',serif;font-size:16px;font-weight:900;color:var(--gold);letter-spacing:4px}
 .hdrsub{font-size:9px;color:var(--dim);letter-spacing:2px;margin-top:2px}
-.hdrturn{font-family:'Cinzel',serif;font-size:26px;font-weight:900;color:var(--gold2);text-shadow:0 0 20px rgba(232,184,75,.5)}
-.hdr-phase{font-size:9px;letter-spacing:2px;text-align:center;margin-top:2px}
-.phase-lobby{color:var(--blueB)}.phase-combat{color:var(--greenB)}.phase-ended{color:var(--dim)}
+.hdrturn{font-family:'Cinzel',serif;font-size:22px;font-weight:900;color:var(--gold2)}
+.phase-badge{font-size:9px;letter-spacing:2px;padding:2px 8px;border-radius:2px;margin-top:2px;display:inline-block}
+.phase-lobby{background:rgba(34,85,170,.2);color:var(--blueB);border:1px solid var(--blue)}
+.phase-combat{background:rgba(204,51,51,.2);color:#ff7777;border:1px solid var(--red)}
+.phase-ended{background:rgba(85,82,80,.2);color:var(--dim);border:1px solid var(--border)}
 .hdracts{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+
+/* INITIATIVE BAR */
+.init-bar{display:flex;gap:6px;padding:8px 24px;background:var(--bg2);border-bottom:1px solid var(--border);overflow-x:auto;flex-shrink:0}
+.init-chip{display:flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid var(--border);border-radius:3px;font-size:10px;white-space:nowrap;transition:all .3s}
+.init-chip.ally-chip{background:rgba(34,85,170,.1)}
+.init-chip.enemy-chip{background:rgba(204,51,51,.1)}
+.init-chip.current{border-color:var(--gold2);background:rgba(232,184,75,.15);box-shadow:0 0 12px rgba(232,184,75,.3);animation:pulseGold 1.5s ease-in-out infinite}
+.init-chip.dead-chip{opacity:.3;text-decoration:line-through}
+.init-chip-name{font-family:'Cinzel',serif;font-size:11px}
+.init-chip-val{font-size:9px;color:var(--dim);background:var(--bg3);padding:1px 5px;border-radius:2px}
+.init-arrow{color:var(--gold2);font-size:12px;animation:bounce .6s ease-in-out infinite}
+@keyframes bounce{0%,100%{transform:translateX(0)}50%{transform:translateX(3px)}}
+@keyframes pulseGold{0%,100%{box-shadow:0 0 12px rgba(232,184,75,.3)}50%{box-shadow:0 0 20px rgba(232,184,75,.6)}}
+.turn-marker{font-size:8px;color:var(--gold2);background:rgba(232,184,75,.15);padding:1px 5px;border-radius:2px;margin-left:4px;animation:pulseGold 1s ease-in-out infinite}
 
 /* TABS */
 .tabbar{display:flex;border-bottom:1px solid var(--border);background:var(--bg2);flex-shrink:0;padding:0 24px;overflow-x:auto}
@@ -548,23 +1066,19 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 
 /* BODY */
 .abody{flex:1;padding:18px 24px 130px;overflow-y:auto}
-.card{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:16px;position:relative;margin-bottom:14px}
-.card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--gold),transparent);opacity:.25}
-.ctitle{font-family:'Cinzel',serif;font-size:10px;letter-spacing:3px;color:var(--gold);margin-bottom:12px;padding-bottom:7px;border-bottom:1px solid var(--border)}
-.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.cgrid{display:grid;grid-template-columns:230px 1fr 230px;gap:12px}
-
-/* SETUP */
+.g3{display:grid;grid-template-columns:220px 1fr 220px;gap:12px}
+.setup-row{display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;margin-bottom:6px}
+.sname{flex:1;font-family:'Cinzel',serif;font-size:12px}
+.sstat{font-size:10px;color:var(--dim);min-width:46px}
+.rdy-yes{color:var(--greenB)}.rdy-no{color:var(--gold)}
 .sform{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px}
 .sform .f{margin-bottom:0;flex:1;min-width:70px}
-.sform .f input,.sform .f select{padding:7px 10px;font-size:12px}
+.sform .f input{padding:7px 10px;font-size:12px}
 .presets{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
 .pbtn2{background:none;border:1px solid var(--border);color:var(--dim);font-family:'Cinzel',serif;font-size:9px;letter-spacing:1px;padding:4px 10px;border-radius:2px;cursor:pointer;transition:all .2s}
 .pbtn2:hover{border-color:var(--gold);color:var(--gold)}
-.setup-row{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;margin-bottom:6px}
-.sname{flex:1;font-family:'Cinzel',serif;font-size:12px}
-.sstat{font-size:10px;color:var(--dim);min-width:48px}
-.rdy-yes{color:var(--greenB)}.rdy-no{color:var(--gold)}
+.empty{text-align:center;color:var(--dim);font-size:10px;padding:24px;letter-spacing:2px}
+.dim{color:var(--dim)}
 
 /* COMBAT CARDS */
 .ccard{background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:11px;cursor:pointer;transition:all .2s;margin-bottom:7px}
@@ -572,6 +1086,7 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 .ccard.is-atk{border-color:var(--blueB);box-shadow:0 0 10px rgba(68,136,238,.2)}
 .ccard.is-tgt{border-color:var(--red);box-shadow:0 0 10px rgba(204,51,51,.2)}
 .ccard.is-dead{opacity:.4;cursor:default;pointer-events:none}
+.ccard.is-current-turn{border-color:var(--gold2);box-shadow:0 0 15px rgba(232,184,75,.25)}
 .ctop{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
 .cname{font-family:'Cinzel',serif;font-size:13px;margin-left:5px}
 .catag{font-size:10px;color:var(--dim);background:var(--bg2);border:1px solid var(--border);padding:1px 7px;border-radius:2px}
@@ -586,15 +1101,7 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 .rlbl{font-size:8px;letter-spacing:1px;margin-top:4px}
 .atklbl{color:var(--blueB)}.tgtlbl{color:#ff7777}
 
-/* INITIATIVE */
-.irow{display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;margin-bottom:5px}
-.irow.idead{opacity:.4}
-.inum{font-family:'Cinzel',serif;font-size:15px;color:var(--gold);width:20px}
-.iname{flex:1;font-size:12px}
-.ival{font-size:11px;padding:1px 7px;border-radius:2px}
-.ival.ally{color:var(--blueB)}.ival.enemy{color:#ff7777}
-
-/* ATTACK PANEL */
+/* VATS */
 .selrow{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
 .selbox{border:1px solid var(--border);border-radius:3px;padding:9px}
 .selbox.ab{border-color:rgba(68,136,238,.4);background:rgba(34,85,170,.06)}
@@ -608,13 +1115,10 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 .svgp:hover{fill:rgba(197,151,58,.22);stroke:var(--gold)}
 .svgp.svgsel{fill:rgba(197,151,58,.38);stroke:var(--gold2);stroke-width:2;filter:drop-shadow(0 0 5px rgba(197,151,58,.5))}
 .svgp.critp{fill:rgba(204,51,51,.12);stroke:rgba(204,51,51,.45)}
-.svgp.critp:hover{fill:rgba(204,51,51,.28)}
 .svgp.critp.svgsel{fill:rgba(204,51,51,.42);stroke:#ff4444;filter:drop-shadow(0 0 5px rgba(204,51,51,.5))}
-.partscol{flex:1;display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:230px}
+.partscol{flex:1;display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:220px}
 .pbtn{background:var(--bg3);border:1px solid var(--border);border-radius:2px;padding:6px 9px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;width:100%;transition:all .2s;text-align:left}
-.pbtn:hover{border-color:var(--brd2)}
-.pbtn.sel{border-color:var(--gold);background:rgba(197,151,58,.07)}
-.pbtn.selc{border-color:var(--red);background:rgba(204,51,51,.07)}
+.pbtn:hover{border-color:var(--brd2)}.pbtn.sel{border-color:var(--gold);background:rgba(197,151,58,.07)}.pbtn.selc{border-color:var(--red);background:rgba(204,51,51,.07)}
 .pname{font-family:'Cinzel',serif;font-size:10px;color:var(--text)}
 .ptags2{display:flex;gap:3px}
 .pt{font-size:8px;padding:1px 4px;border-radius:2px}
@@ -625,27 +1129,24 @@ body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradi
 .df label{display:block;font-size:8px;letter-spacing:2px;color:var(--dim);margin-bottom:4px}
 .df input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'Share Tech Mono',monospace;font-size:26px;text-align:center;padding:9px;border-radius:3px;outline:none;transition:border-color .2s}
 .df input:focus{border-color:var(--gold)}
-input[type=number]{-moz-appearance:textfield}
-input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
+input[type=number]{-moz-appearance:textfield}input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
 .rbox{background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:12px;margin-bottom:10px;font-family:'Crimson Pro',serif;font-size:15px;color:var(--mid);line-height:1.65;min-height:65px}
 
 /* LOG */
-.llist{display:flex;flex-direction:column;gap:4px;max-height:300px;overflow-y:auto}
+.llist{display:flex;flex-direction:column;gap:4px;max-height:320px;overflow-y:auto}
 .lturn{font-family:'Cinzel',serif;font-size:9px;letter-spacing:3px;color:var(--gold);padding:7px 0 3px;border-top:1px solid var(--border);margin-top:4px}
 .lturn:first-child{border-top:none;margin-top:0;padding-top:0}
 .lentry{background:var(--bg3);border-left:3px solid var(--border);border-radius:2px;padding:6px 9px;font-size:11px;line-height:1.5}
 .lhit{border-left-color:#3dba63}.lmiss{border-left-color:#555}.lcrit{border-left-color:#e8b84b}.lkill{border-left-color:var(--red)}.lfumble{border-left-color:var(--red)}
-.empty{text-align:center;color:var(--dim);font-size:10px;padding:24px;letter-spacing:2px}
-.dim{color:var(--dim)}
 
-/* CHAT FLOAT */
-#chat-float{position:fixed;bottom:0;left:16px;width:290px;z-index:500;background:var(--panel);border:1px solid var(--border);border-bottom:none;border-radius:6px 6px 0 0;box-shadow:0 -4px 30px rgba(0,0,0,.4);display:flex;flex-direction:column}
+/* CHAT */
+#chat-float{position:fixed;bottom:0;left:16px;width:280px;z-index:500;background:var(--panel);border:1px solid var(--border);border-bottom:none;border-radius:6px 6px 0 0;box-shadow:0 -4px 30px rgba(0,0,0,.4);display:flex;flex-direction:column}
 #chat-hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-bottom:1px solid var(--border);cursor:pointer;background:var(--bg2);border-radius:6px 6px 0 0}
 #chat-htitle{font-family:'Cinzel',serif;font-size:10px;letter-spacing:2px;color:var(--gold);display:flex;align-items:center;gap:8px}
-#chat-badge{display:none;background:var(--red);color:#fff;font-size:9px;padding:1px 6px;border-radius:10px;min-width:18px;text-align:center}
+#chat-badge{display:none;background:var(--red);color:#fff;font-size:9px;padding:1px 6px;border-radius:10px}
 #chat-tog{font-size:11px;color:var(--dim);background:none;border:none;cursor:pointer}
-#chat-body{display:flex;flex-direction:column;height:230px}
-#chat-dm,#chat-p{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:5px}
+#chat-body{display:flex;flex-direction:column;height:220px}
+#chat-dm,#chat-p{flex:1;overflow-y:auto;padding:8px 12px;display:flex;flex-direction:column;gap:4px}
 .cmsg{display:flex;flex-direction:column;gap:1px}
 .cfrom{font-size:8px;letter-spacing:1px;color:var(--dim)}
 .cdm{color:var(--gold)}.cme .cfrom{color:var(--blueB)}
@@ -658,13 +1159,24 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 .cinprow button:hover{background:var(--gold);color:var(--bg)}
 
 /* PLAYER LOBBY */
-.lobbyhero{text-align:center;padding:28px 0 18px}
-.lobbytitle{font-family:'Cinzel',serif;font-size:22px;color:var(--gold);letter-spacing:4px;margin-bottom:6px}
+.lobbyhero{text-align:center;padding:20px 0 14px}
+.lobbytitle{font-family:'Cinzel',serif;font-size:20px;color:var(--gold);letter-spacing:4px;margin-bottom:6px}
 .lobbysub{font-size:11px;color:var(--dim);letter-spacing:2px}
-.charform{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.charform{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
 .charform .f{margin-bottom:0}
-.charform .f input{padding:9px 12px;font-size:13px}
 #saved-badge{display:none;margin-top:10px;text-align:center;font-size:10px;color:var(--greenB);letter-spacing:2px}
+
+/* PLAYER PROFILE */
+.profile-hero{text-align:center;padding:24px 0 20px}
+.profile-avatar{width:80px;height:80px;background:var(--bg3);border:2px solid var(--gold);border-radius:50%;font-family:'Cinzel',serif;font-size:32px;font-weight:900;color:var(--gold);display:flex;align-items:center;justify-content:center;margin:0 auto 12px}
+.profile-name{font-family:'Cinzel',serif;font-size:20px;color:var(--text);letter-spacing:3px}
+.profile-class{font-size:11px;color:var(--dim);letter-spacing:2px;margin-top:4px}
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+.stat-card{background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:12px;text-align:center}
+.stat-num{font-family:'Cinzel',serif;font-size:28px;font-weight:900;line-height:1}
+.stat-lbl{font-size:8px;color:var(--dim);letter-spacing:2px;margin-top:4px}
+.hp-display{background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:14px}
+.hp-label{font-size:9px;letter-spacing:2px;color:var(--dim);margin-bottom:8px;text-align:center}
 
 /* POPUP */
 #combat-popup{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:800;align-items:center;justify-content:center}
@@ -673,85 +1185,139 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 .poptitle{font-family:'Cinzel',serif;font-size:20px;color:var(--gold);letter-spacing:4px;margin-bottom:12px}
 .popsub{font-size:12px;color:var(--mid);margin-bottom:22px;line-height:1.6}
 .popbtns{display:flex;gap:10px;justify-content:center}
+.popbtns .btn{width:auto;margin-bottom:0}
+
+/* TURN POPUP */
+.turn-popup{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) scale(.8);z-index:700;opacity:0;transition:all .3s;pointer-events:none}
+.turn-popup.visible{opacity:1;transform:translate(-50%,-50%) scale(1)}
+.turn-popup-inner{background:var(--panel);border:2px solid var(--border);border-radius:8px;padding:24px 36px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.turn-popup-inner.my-turn{border-color:var(--gold2);box-shadow:0 0 40px rgba(232,184,75,.3)}
+.turn-popup-inner.other-turn{border-color:var(--border)}
+.turn-pop-big{font-family:'Cinzel',serif;font-size:22px;font-weight:900;color:var(--gold2);letter-spacing:4px;margin-bottom:6px;text-shadow:0 0 20px rgba(232,184,75,.5)}
+.turn-pop-name{font-family:'Cinzel',serif;font-size:18px;color:var(--text);letter-spacing:2px}
+.turn-pop-sub{font-size:11px;color:var(--dim);margin-top:4px;letter-spacing:1px}
+
+/* DICE OVERLAY */
+#dice-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:900;align-items:center;justify-content:center;flex-direction:column;gap:16px}
+#dice-overlay.show{display:flex}
+.dice-container{position:relative;width:120px;height:120px}
+.dice-box{width:120px;height:120px;background:var(--bg2);border:3px solid var(--gold);border-radius:12px;display:flex;align-items:center;justify-content:center;animation:diceRoll .15s ease-in-out infinite;box-shadow:0 0 40px rgba(197,151,58,.4)}
+@keyframes diceRoll{0%{transform:rotate(-5deg) scale(1)}50%{transform:rotate(5deg) scale(1.05)}100%{transform:rotate(-5deg) scale(1)}}
+#dice-face{font-family:'Cinzel',serif;font-size:52px;font-weight:900;color:var(--gold2)}
+.dice-label{font-family:'Cinzel',serif;font-size:12px;letter-spacing:4px;color:var(--dim)}
+
+/* BLOOD SPLATTER */
+.blood-splatter{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:9999}
+.blood-drop{position:absolute;width:8px;height:8px;background:var(--red);border-radius:50%;transform:rotate(var(--a)) translateX(var(--d));animation:bloodFly .8s ease-out forwards;opacity:0}
+@keyframes bloodFly{0%{opacity:1;transform:rotate(var(--a)) translateX(0)}100%{opacity:0;transform:rotate(var(--a)) translateX(var(--d))}}
 
 /* TOAST */
 #toast{position:fixed;bottom:20px;right:20px;background:var(--panel);border:1px solid var(--gold);border-radius:4px;padding:10px 18px;font-size:11px;color:var(--gold);z-index:9999;transform:translateY(80px);opacity:0;transition:all .3s;box-shadow:0 4px 20px rgba(197,151,58,.2)}
 #toast.show{transform:translateY(0);opacity:1}
-
 ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:var(--brd2);border-radius:2px}
 
-@media(max-width:1000px){.cgrid{grid-template-columns:200px 1fr}}
-@media(max-width:700px){.cgrid{grid-template-columns:1fr}.g2{grid-template-columns:1fr}.abody{padding:14px 14px 130px}#chat-float{width:calc(100vw - 32px)}}
+@media(max-width:1000px){.g3{grid-template-columns:200px 1fr}.g2{grid-template-columns:1fr}}
+@media(max-width:700px){.g3{grid-template-columns:1fr}.stats-grid{grid-template-columns:repeat(2,1fr)}.abody{padding:14px 14px 130px}#chat-float{width:calc(100vw - 32px)}}
 </style>
 </head>
 <body>
 
-<!-- LANDING -->
-<div id="screen-landing" class="screen active">
-  <div class="lbox">
+<!-- AUTH -->
+<div id="screen-auth" class="screen active">
+  <div class="abox">
     <div class="logo">AETHON</div>
-    <div class="logosub">SYSTEME DE COMBAT D&D MULTIJOUEUR</div>
+    <div class="logosub">PLATEFORME DE CAMPAGNE D&D</div>
     <div class="lsep"></div>
-    <div class="f"><label>Ton nom</label><input id="inp-name" placeholder="Ex: Wren, Ser Brenn, Le DM..."/></div>
-    <div class="f"><label>Code de session (invente par le DM)</label>
-      <input id="inp-sid" placeholder="Ex: ASHENVEIL01" style="text-transform:uppercase" oninput="this.value=this.value.toUpperCase()"/></div>
-    <div class="brow">
-      <button class="btn btn-gold" onclick="joinSession('dm')">GAME MASTER</button>
-      <button class="btn btn-red"  onclick="joinSession('player')">JOUEUR</button>
+    <div class="authtitle" id="auth-title">CONNEXION</div>
+    <div class="f"><label>Pseudo</label><input id="auth-user" placeholder="Ton pseudo..."/></div>
+    <div class="f"><label>Mot de passe</label><input id="auth-pass" type="password" placeholder="Mot de passe..." onkeydown="if(event.key==='Enter')authSubmit(false)"/></div>
+    <button class="btn btn-gold" id="auth-btn" onclick="authSubmit(false)">SE CONNECTER</button>
+    <div class="auth-toggle" id="auth-toggle" onclick="toggleAuthMode()">Pas de compte ? S'inscrire</div>
+  </div>
+</div>
+
+<!-- CAMPAIGNS -->
+<div id="screen-campaigns" class="screen">
+  <div class="camp-hdr">
+    <div>
+      <div class="camp-hdr-title">AETHON</div>
+      <div style="font-size:9px;color:var(--dim);letter-spacing:2px" id="camp-username">—</div>
     </div>
-    <div class="lnote">
-      Config Firebase deja integree dans le code.<br>
-      Le <strong>DM cree la session</strong> avec un code — les joueurs rejoignent avec le meme code.
+    <button class="btn btn-sm btn-gray" onclick="logout()">DECONNEXION</button>
+  </div>
+  <div class="camp-body">
+    <div class="g2">
+      <div>
+        <div class="card">
+          <div class="ctitle">MES CAMPAGNES</div>
+          <div id="my-campaigns"><div class="empty">Chargement...</div></div>
+        </div>
+      </div>
+      <div>
+        <div class="card">
+          <div class="ctitle">CREER UNE CAMPAGNE</div>
+          <div class="f"><label>Nom de la campagne</label><input id="new-camp-name" placeholder="Ex: La Chute d'Ashenveil..."/></div>
+          <button class="btn btn-gold" onclick="createCampaign()">+ CREER ET DEVENIR GM</button>
+        </div>
+        <div class="card">
+          <div class="ctitle">REJOINDRE UNE CAMPAGNE</div>
+          <div class="f"><label>Nom de la campagne</label><input id="search-camp" placeholder="Chercher par nom..."/></div>
+          <button class="btn btn-gray" onclick="searchCampaign()">RECHERCHER</button>
+          <div id="search-results" style="margin-top:10px"></div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
 
-<!-- DM SCREEN -->
-<div id="screen-dm" class="screen">
+<!-- GM SCREEN -->
+<div id="screen-gm" class="screen">
   <div class="hdr">
     <div>
-      <div class="hdrtitle">AETHON — GAME MASTER</div>
-      <div class="hdrsub session-id">SESSION —</div>
+      <div class="hdrtitle camp-title">CAMPAGNE</div>
+      <div class="hdrsub camp-gm">GM —</div>
     </div>
     <div style="text-align:center">
-      <div class="hdrturn turn-num">1</div>
-      <div id="dm-phase" class="hdr-phase phase-lobby">LOBBY</div>
+      <div class="hdrturn turn-num">0</div>
+      <div id="gm-phase" class="phase-badge phase-lobby">LOBBY</div>
     </div>
     <div class="hdracts">
       <button class="btn btn-sm btn-gold"  onclick="nextTurn()">TOUR+ ▶</button>
-      <button class="btn btn-sm btn-green" onclick="startCombat()">LANCER</button>
+      <button class="btn btn-sm btn-green" onclick="startCombat()">LANCER COMBAT</button>
       <button class="btn btn-sm btn-gray"  onclick="endCombat()">TERMINER</button>
-      <button class="btn btn-sm btn-red"   onclick="quitCombat()">QUITTER</button>
+      <button class="btn btn-sm btn-gray"  onclick="quitCombatScreen()">QUITTER COMBAT</button>
+      <button class="btn btn-sm btn-gray"  style="border-color:var(--dim)" onclick="show('screen-campaigns');loadCampaigns()">← CAMPAGNES</button>
     </div>
   </div>
+  <div id="init-bar-gm" class="init-bar"></div>
   <div class="tabbar">
     <button class="tbtn dtab active" id="dt-setup"  onclick="showDMTab('setup')">SETUP</button>
     <button class="tbtn dtab"        id="dt-combat" onclick="showDMTab('combat')">COMBAT</button>
     <button class="tbtn dtab"        id="dt-log"    onclick="showDMTab('log')">JOURNAL</button>
-    <button class="tbtn dtab"        id="dt-init"   onclick="showDMTab('init')">INITIATIVE</button>
+    <button class="tbtn dtab"        id="dt-apps"   onclick="showDMTab('apps')">DEMANDES</button>
   </div>
   <div class="abody">
 
-    <!-- SETUP -->
     <div class="dpnl active" id="dp-setup">
       <div class="g2">
         <div>
           <div class="card">
             <div class="ctitle">ENNEMIS</div>
             <div class="presets">
-              <button class="pbtn2" onclick="loadPreset('soldier')">Soldat Maren</button>
+              <button class="pbtn2" onclick="loadPreset('soldier')">Soldat</button>
               <button class="pbtn2" onclick="loadPreset('hunter')">Chasseur</button>
               <button class="pbtn2" onclick="loadPreset('whisper')">Susurro</button>
-              <button class="pbtn2" onclick="loadPreset('guard')">Garde royal</button>
+              <button class="pbtn2" onclick="loadPreset('guard')">Garde</button>
               <button class="pbtn2" onclick="loadPreset('bandit')">Bandit</button>
               <button class="pbtn2" onclick="loadPreset('troll')">Troll</button>
+              <button class="pbtn2" onclick="loadPreset('dragon')">Dragon</button>
             </div>
             <div class="sform">
               <div class="f"><label>Nom</label><input id="e-name" placeholder="Nom..."/></div>
               <div class="f"><label>CA</label><input id="e-ca" type="number" value="12"/></div>
               <div class="f"><label>PV</label><input id="e-pv" type="number" value="20"/></div>
               <div class="f"><label>Init</label><input id="e-init" type="number" value="0"/></div>
-              <button class="btn btn-gold btn-sm" onclick="addEnemy()" style="align-self:flex-end;margin-bottom:0">+ ADD</button>
+              <button class="btn btn-gold btn-sm" onclick="addEnemy()" style="align-self:flex-end">+ ADD</button>
             </div>
             <div id="enemy-list"><div class="empty">Aucun ennemi</div></div>
           </div>
@@ -759,29 +1325,29 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
         <div>
           <div class="card">
             <div class="ctitle">JOUEURS CONNECTES</div>
-            <div id="player-list"><div class="empty">En attente...</div></div>
+            <div id="member-list"><div class="empty">Aucun joueur</div></div>
           </div>
           <div class="card" style="background:rgba(42,138,74,.06);border-color:rgba(61,186,99,.3)">
-            <div class="ctitle" style="color:var(--greenB)">DEMARRER LE COMBAT</div>
-            <p style="font-size:11px;color:var(--dim);margin-bottom:14px;line-height:1.7">Les PV seront reinitialises et le journal efface a chaque nouveau combat.</p>
-            <button class="btn btn-green btn-blk" onclick="startCombat()">DEMARRER LE COMBAT</button>
+            <div class="ctitle" style="color:var(--greenB)">LANCER LE COMBAT</div>
+            <p style="font-size:11px;color:var(--dim);margin-bottom:14px;line-height:1.7">L'initiative sera tiree automatiquement. Les PV seront reinitialises.</p>
+            <button class="btn btn-green" onclick="startCombat()" style="width:100%">DEMARRER LE COMBAT</button>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- COMBAT -->
     <div class="dpnl" id="dp-combat">
-      <div class="cgrid">
+      <div class="g3">
         <div>
           <div class="card">
             <div class="ctitle">COMBATTANTS</div>
-            <div style="font-size:8px;color:var(--dim);margin-bottom:7px">BLEU = attaquant · ROUGE = cible</div>
+            <div style="font-size:8px;color:var(--dim);margin-bottom:7px">BLEU=attaquant · ROUGE=cible</div>
             <div id="comb-dm"></div>
           </div>
+          <button class="btn btn-gray btn-sm" onclick="skipTurn()" style="width:100%;margin-top:4px">PASSER LE TOUR</button>
         </div>
         <div class="card">
-          <div class="ctitle">S.C.A.V. — SYSTEME DE CIBLAGE</div>
+          <div class="ctitle">S.C.A.V. — CIBLAGE (ENNEMIS)</div>
           <div class="selrow">
             <div class="selbox ab"><div class="sellbl">ATTAQUANT</div><div class="selval" id="atklbl">- Aucun -</div></div>
             <div class="selbox tb"><div class="sellbl">CIBLE <span id="tgt-ca" style="color:var(--gold);font-size:9px"></span></div><div class="selval" id="tgtlbl">- Aucun -</div></div>
@@ -789,61 +1355,58 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
           <div class="vatswrap">
             <div class="bodycol">
               <svg class="bsvg" viewBox="0 0 80 200">
-                <ellipse id="sv-tete"    class="svgp critp" cx="40" cy="18" rx="14" ry="16" onclick="selPart2('tete')"/>
-                <rect    id="sv-cou"     class="svgp critp" x="33" y="33" width="14" height="10" rx="3" onclick="selPart2('cou')"/>
-                <rect    id="sv-torse"   class="svgp"       x="22" y="43" width="36" height="50" rx="4" onclick="selPart2('torse')"/>
-                <rect    id="sv-bras_g"  class="svgp"       x="6"  y="45" width="14" height="45" rx="5" onclick="selPart2('bras_g')"/>
-                <rect    id="sv-bras_d"  class="svgp"       x="60" y="45" width="14" height="45" rx="5" onclick="selPart2('bras_d')"/>
-                <rect    id="sv-bassin"  class="svgp"       x="25" y="93" width="30" height="18" rx="3" onclick="selPart2('bassin')"/>
-                <rect    id="sv-jambe_g" class="svgp"       x="22" y="111" width="16" height="60" rx="5" onclick="selPart2('jambe_g')"/>
-                <rect    id="sv-jambe_d" class="svgp"       x="42" y="111" width="16" height="60" rx="5" onclick="selPart2('jambe_d')"/>
+                <ellipse id="sv-tete"    class="svgp critp" cx="40" cy="18" rx="14" ry="16" onclick="selPart('tete')"/>
+                <rect    id="sv-cou"     class="svgp critp" x="33" y="33" width="14" height="10" rx="3" onclick="selPart('cou')"/>
+                <rect    id="sv-torse"   class="svgp"       x="22" y="43" width="36" height="50" rx="4" onclick="selPart('torse')"/>
+                <rect    id="sv-bras_g"  class="svgp"       x="6"  y="45" width="14" height="45" rx="5" onclick="selPart('bras_g')"/>
+                <rect    id="sv-bras_d"  class="svgp"       x="60" y="45" width="14" height="45" rx="5" onclick="selPart('bras_d')"/>
+                <rect    id="sv-bassin"  class="svgp"       x="25" y="93" width="30" height="18" rx="3" onclick="selPart('bassin')"/>
+                <rect    id="sv-jambe_g" class="svgp"       x="22" y="111" width="16" height="60" rx="5" onclick="selPart('jambe_g')"/>
+                <rect    id="sv-jambe_d" class="svgp"       x="42" y="111" width="16" height="60" rx="5" onclick="selPart('jambe_d')"/>
                 <text x="40" y="21" text-anchor="middle" fill="rgba(197,151,58,.55)" font-size="6" font-family="Share Tech Mono">TETE</text>
                 <text x="40" y="70" text-anchor="middle" fill="rgba(197,151,58,.55)" font-size="6" font-family="Share Tech Mono">TORSE</text>
               </svg>
             </div>
             <div class="partscol">
-              <div id="pb-tete"    class="pbtn" onclick="selPart2('tete')">   <span class="pname">Tete</span>       <div class="ptags2"><span class="pt ptdc">DC+4</span><span class="pt ptdm">x1.5</span><span class="pt ptfx">ASSOMME</span></div></div>
-              <div id="pb-cou"     class="pbtn" onclick="selPart2('cou')">    <span class="pname">Cou</span>        <div class="ptags2"><span class="pt ptdc">DC+6</span><span class="pt ptdm">x2.0</span><span class="pt ptfx">DECAP.</span></div></div>
-              <div id="pb-torse"   class="pbtn" onclick="selPart2('torse')">  <span class="pname">Torse</span>     <div class="ptags2"><span class="pt ptdc">DC+0</span><span class="pt ptdm">x1.0</span></div></div>
-              <div id="pb-bras_g"  class="pbtn" onclick="selPart2('bras_g')"> <span class="pname">Bras gauche</span><div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
-              <div id="pb-bras_d"  class="pbtn" onclick="selPart2('bras_d')"> <span class="pname">Bras droit</span> <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
-              <div id="pb-bassin"  class="pbtn" onclick="selPart2('bassin')"> <span class="pname">Bassin</span>    <div class="ptags2"><span class="pt ptdc">DC+1</span><span class="pt ptdm">x1.0</span></div></div>
-              <div id="pb-jambe_g" class="pbtn" onclick="selPart2('jambe_g')"><span class="pname">Jambe g.</span>  <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
-              <div id="pb-jambe_d" class="pbtn" onclick="selPart2('jambe_d')"><span class="pname">Jambe d.</span>  <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-tete"    class="pbtn" onclick="selPart('tete')">   <span class="pname">Tete</span>        <div class="ptags2"><span class="pt ptdc">DC+4</span><span class="pt ptdm">x1.5</span><span class="pt ptfx">ASSOMME</span></div></div>
+              <div id="pb-cou"     class="pbtn" onclick="selPart('cou')">    <span class="pname">Cou</span>         <div class="ptags2"><span class="pt ptdc">DC+6</span><span class="pt ptdm">x2.0</span><span class="pt ptfx">DECAP.</span></div></div>
+              <div id="pb-torse"   class="pbtn" onclick="selPart('torse')">  <span class="pname">Torse</span>      <div class="ptags2"><span class="pt ptdc">DC+0</span><span class="pt ptdm">x1.0</span></div></div>
+              <div id="pb-bras_g"  class="pbtn" onclick="selPart('bras_g')"> <span class="pname">Bras gauche</span><div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-bras_d"  class="pbtn" onclick="selPart('bras_d')"> <span class="pname">Bras droit</span> <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-bassin"  class="pbtn" onclick="selPart('bassin')"> <span class="pname">Bassin</span>     <div class="ptags2"><span class="pt ptdc">DC+1</span><span class="pt ptdm">x1.0</span></div></div>
+              <div id="pb-jambe_g" class="pbtn" onclick="selPart('jambe_g')"><span class="pname">Jambe g.</span>   <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-jambe_d" class="pbtn" onclick="selPart('jambe_d')"><span class="pname">Jambe d.</span>   <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
             </div>
           </div>
           <div class="dicerow">
             <div class="df"><label>Resultat d20</label><input id="inp-d20" type="number" min="1" max="20" placeholder="1-20" oninput="computeResult()"/></div>
-            <div class="df"><label>Degats (resultat des)</label><input id="inp-dmg" type="number" min="0" placeholder="ex: 6" oninput="computeResult()"/></div>
+            <div class="df"><label>Degats (des)</label><input id="inp-dmg" type="number" min="0" placeholder="ex: 6" oninput="computeResult()"/></div>
           </div>
           <div class="rbox" id="result-box"><span class="dim">Selectionne attaquant → cible → partie → entre les des</span></div>
-          <button class="btn btn-green btn-blk" id="confirm-btn" onclick="confirmAttack()" disabled>CONFIRMER L'ATTAQUE</button>
+          <button class="btn btn-green" id="confirm-btn" onclick="confirmAttack()" disabled style="width:100%">CONFIRMER L'ATTAQUE</button>
         </div>
         <div class="card">
-          <div class="ctitle">JOURNAL — TOUR <span class="turn-num">1</span></div>
+          <div class="ctitle">JOURNAL</div>
           <div id="log-dm" class="llist"></div>
         </div>
       </div>
     </div>
 
-    <!-- LOG -->
     <div class="dpnl" id="dp-log">
+      <div class="card"><div class="ctitle">JOURNAL COMPLET</div><div id="log-dm" class="llist" style="max-height:none"></div></div>
+    </div>
+
+    <div class="dpnl" id="dp-apps">
       <div class="card">
-        <div class="ctitle">JOURNAL COMPLET</div>
-        <div id="log-dm" class="llist" style="max-height:none"></div>
+        <div class="ctitle">DEMANDES D'ADMISSION</div>
+        <div id="applications-list"><div class="empty">Aucune demande</div></div>
       </div>
     </div>
 
-    <!-- INITIATIVE -->
-    <div class="dpnl" id="dp-init">
-      <div class="card"><div class="ctitle">ORDRE D'INITIATIVE</div><div id="init-dm"></div></div>
-    </div>
-
   </div>
-
   <div id="chat-float">
     <div id="chat-hdr" onclick="toggleChat()">
-      <div id="chat-htitle">CHAT SESSION <span id="chat-badge">!</span></div>
+      <div id="chat-htitle">CHAT <span id="chat-badge">!</span></div>
       <button id="chat-tog">▼</button>
     </div>
     <div id="chat-body">
@@ -854,92 +1417,91 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 </div>
 
 <!-- PLAYER SCREEN -->
-<div id="screen-player" class="screen">
+<div id="screen-player-camp" class="screen">
   <div class="hdr">
     <div>
-      <div class="hdrtitle">AETHON — <span class="my-name">JOUEUR</span></div>
-      <div class="hdrsub session-id">SESSION —</div>
+      <div class="hdrtitle camp-title">CAMPAGNE</div>
+      <div class="hdrsub camp-gm">—</div>
     </div>
-    <div class="hdrturn turn-num">1</div>
+    <div class="hdrturn turn-num">0</div>
     <div class="hdracts">
-      <button class="btn btn-sm btn-red" onclick="quitCombat()">QUITTER COMBAT</button>
+      <button class="btn btn-sm btn-gray" onclick="skipTurn()">PASSER MON TOUR</button>
+      <button class="btn btn-sm btn-gray" onclick="quitCombatScreen()">← LOBBY</button>
+      <button class="btn btn-sm btn-gray" style="border-color:var(--dim)" onclick="show('screen-campaigns');loadCampaigns()">← CAMPAGNES</button>
     </div>
   </div>
+  <div id="init-bar-player" class="init-bar"></div>
   <div class="tabbar">
-    <button class="tbtn ptab active" id="pt-lobby"  onclick="showPlayerTab('lobby')">MON PERSO</button>
-    <button class="tbtn ptab"        id="pt-combat" onclick="showPlayerTab('combat')">COMBAT</button>
-    <button class="tbtn ptab"        id="pt-init"   onclick="showPlayerTab('init')">INITIATIVE</button>
-    <button class="tbtn ptab"        id="pt-log"    onclick="showPlayerTab('log')">JOURNAL</button>
+    <button class="tbtn ptab active" id="pt-lobby"   onclick="showPlayerTab('lobby')">MON PERSO</button>
+    <button class="tbtn ptab"        id="pt-combat"  onclick="showPlayerTab('combat')">COMBAT</button>
+    <button class="tbtn ptab"        id="pt-profile" onclick="showProfile()">PROFIL / STATS</button>
+    <button class="tbtn ptab"        id="pt-log"     onclick="showPlayerTab('log')">JOURNAL</button>
   </div>
   <div class="abody">
 
-    <!-- MON PERSO -->
     <div class="ppnl active" id="pp-lobby">
-      <div class="lobbyhero">
-        <div class="lobbytitle">MON PERSONNAGE</div>
-        <div class="lobbysub">Tes stats — uniquement visibles par toi et le DM</div>
-      </div>
-      <div class="card" style="max-width:460px;margin:0 auto">
-        <div class="ctitle">MES STATISTIQUES DE COMBAT</div>
+      <div class="lobbyhero"><div class="lobbytitle">MON PERSONNAGE</div><div class="lobbysub">Stats visibles uniquement par toi et le GM</div></div>
+      <div class="card" style="max-width:480px;margin:0 auto">
+        <div class="ctitle">STATISTIQUES DE COMBAT</div>
         <div class="charform">
-          <div class="f"><label>Classe / Role</label><input id="p-class" placeholder="Guerrier, Rodeur..."/></div>
-          <div class="f"><label>Classe d'armure (CA)</label><input id="p-ca" type="number" value="12"/></div>
-          <div class="f"><label>Points de vie max</label><input id="p-pv" type="number" value="20"/></div>
-          <div class="f"><label>Bonus d'initiative</label><input id="p-init" type="number" value="0"/></div>
+          <div class="f"><label>Classe</label><input id="p-class" placeholder="Guerrier, Rodeur..."/></div>
+          <div class="f"><label>Classe d'armure</label><input id="p-ca" type="number" value="12"/></div>
+          <div class="f"><label>PV max</label><input id="p-pv" type="number" value="20"/></div>
+          <div class="f"><label>Bonus initiative</label><input id="p-init" type="number" value="0"/></div>
+          <div class="f"><label>Bonus attaque</label><input id="p-atk" type="number" value="3"/></div>
         </div>
-        <button class="btn btn-gold btn-blk" onclick="saveMyChar()">SAUVEGARDER MON PERSONNAGE</button>
-        <div id="saved-badge">✓ PERSONNAGE PRET — EN ATTENTE DU COMBAT</div>
+        <button class="btn btn-gold" onclick="saveMyChar()" style="width:100%">SAUVEGARDER</button>
+        <div id="saved-badge">✓ PERSONNAGE PRET</div>
       </div>
     </div>
 
-    <!-- COMBAT PLAYER -->
     <div class="ppnl" id="pp-combat">
-      <div class="cgrid">
+      <div class="g3">
         <div>
           <div class="card">
             <div class="ctitle">COMBATTANTS</div>
-            <div style="font-size:8px;color:var(--dim);margin-bottom:7px">PV/CA ennemis caches</div>
+            <div style="font-size:8px;color:var(--dim);margin-bottom:7px">Clique sur un ennemi pour cibler</div>
             <div id="comb-player"></div>
           </div>
         </div>
         <div class="card">
           <div class="ctitle">MON ATTAQUE</div>
           <div class="selrow">
-            <div class="selbox ab"><div class="sellbl">ATTAQUANT</div><div class="selval" id="atklbl-p">- Aucun -</div></div>
-            <div class="selbox tb"><div class="sellbl">CIBLE</div><div class="selval" id="tgtlbl-p">- Aucun -</div></div>
+            <div class="selbox ab"><div class="sellbl">MOI</div><div class="selval" id="atklbl-p">- Selectionne toi -</div></div>
+            <div class="selbox tb"><div class="sellbl">CIBLE</div><div class="selval" id="tgtlbl-p">- Selectionne ennemi -</div></div>
           </div>
           <div class="vatswrap">
             <div class="bodycol">
               <svg class="bsvg" viewBox="0 0 80 200">
-                <ellipse id="sv-tete"    class="svgp critp" cx="40" cy="18" rx="14" ry="16" onclick="selPart2('tete')"/>
-                <rect    id="sv-cou"     class="svgp critp" x="33" y="33" width="14" height="10" rx="3" onclick="selPart2('cou')"/>
-                <rect    id="sv-torse"   class="svgp"       x="22" y="43" width="36" height="50" rx="4" onclick="selPart2('torse')"/>
-                <rect    id="sv-bras_g"  class="svgp"       x="6"  y="45" width="14" height="45" rx="5" onclick="selPart2('bras_g')"/>
-                <rect    id="sv-bras_d"  class="svgp"       x="60" y="45" width="14" height="45" rx="5" onclick="selPart2('bras_d')"/>
-                <rect    id="sv-bassin"  class="svgp"       x="25" y="93" width="30" height="18" rx="3" onclick="selPart2('bassin')"/>
-                <rect    id="sv-jambe_g" class="svgp"       x="22" y="111" width="16" height="60" rx="5" onclick="selPart2('jambe_g')"/>
-                <rect    id="sv-jambe_d" class="svgp"       x="42" y="111" width="16" height="60" rx="5" onclick="selPart2('jambe_d')"/>
+                <ellipse id="sv-tete"    class="svgp critp" cx="40" cy="18" rx="14" ry="16" onclick="selPart('tete')"/>
+                <rect    id="sv-cou"     class="svgp critp" x="33" y="33" width="14" height="10" rx="3" onclick="selPart('cou')"/>
+                <rect    id="sv-torse"   class="svgp"       x="22" y="43" width="36" height="50" rx="4" onclick="selPart('torse')"/>
+                <rect    id="sv-bras_g"  class="svgp"       x="6"  y="45" width="14" height="45" rx="5" onclick="selPart('bras_g')"/>
+                <rect    id="sv-bras_d"  class="svgp"       x="60" y="45" width="14" height="45" rx="5" onclick="selPart('bras_d')"/>
+                <rect    id="sv-bassin"  class="svgp"       x="25" y="93" width="30" height="18" rx="3" onclick="selPart('bassin')"/>
+                <rect    id="sv-jambe_g" class="svgp"       x="22" y="111" width="16" height="60" rx="5" onclick="selPart('jambe_g')"/>
+                <rect    id="sv-jambe_d" class="svgp"       x="42" y="111" width="16" height="60" rx="5" onclick="selPart('jambe_d')"/>
                 <text x="40" y="21" text-anchor="middle" fill="rgba(197,151,58,.55)" font-size="6" font-family="Share Tech Mono">TETE</text>
                 <text x="40" y="70" text-anchor="middle" fill="rgba(197,151,58,.55)" font-size="6" font-family="Share Tech Mono">TORSE</text>
               </svg>
             </div>
             <div class="partscol">
-              <div id="pb-tete"    class="pbtn" onclick="selPart2('tete')">   <span class="pname">Tete</span>       <div class="ptags2"><span class="pt ptdc">DC+4</span><span class="pt ptdm">x1.5</span></div></div>
-              <div id="pb-cou"     class="pbtn" onclick="selPart2('cou')">    <span class="pname">Cou</span>        <div class="ptags2"><span class="pt ptdc">DC+6</span><span class="pt ptdm">x2.0</span></div></div>
-              <div id="pb-torse"   class="pbtn" onclick="selPart2('torse')">  <span class="pname">Torse</span>     <div class="ptags2"><span class="pt ptdc">DC+0</span><span class="pt ptdm">x1.0</span></div></div>
-              <div id="pb-bras_g"  class="pbtn" onclick="selPart2('bras_g')"> <span class="pname">Bras gauche</span><div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
-              <div id="pb-bras_d"  class="pbtn" onclick="selPart2('bras_d')"> <span class="pname">Bras droit</span> <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
-              <div id="pb-bassin"  class="pbtn" onclick="selPart2('bassin')"> <span class="pname">Bassin</span>    <div class="ptags2"><span class="pt ptdc">DC+1</span><span class="pt ptdm">x1.0</span></div></div>
-              <div id="pb-jambe_g" class="pbtn" onclick="selPart2('jambe_g')"><span class="pname">Jambe g.</span>  <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
-              <div id="pb-jambe_d" class="pbtn" onclick="selPart2('jambe_d')"><span class="pname">Jambe d.</span>  <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-tete"    class="pbtn" onclick="selPart('tete')">   <span class="pname">Tete</span>        <div class="ptags2"><span class="pt ptdc">DC+4</span><span class="pt ptdm">x1.5</span></div></div>
+              <div id="pb-cou"     class="pbtn" onclick="selPart('cou')">    <span class="pname">Cou</span>         <div class="ptags2"><span class="pt ptdc">DC+6</span><span class="pt ptdm">x2.0</span></div></div>
+              <div id="pb-torse"   class="pbtn" onclick="selPart('torse')">  <span class="pname">Torse</span>      <div class="ptags2"><span class="pt ptdc">DC+0</span><span class="pt ptdm">x1.0</span></div></div>
+              <div id="pb-bras_g"  class="pbtn" onclick="selPart('bras_g')"> <span class="pname">Bras gauche</span><div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-bras_d"  class="pbtn" onclick="selPart('bras_d')"> <span class="pname">Bras droit</span> <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-bassin"  class="pbtn" onclick="selPart('bassin')"> <span class="pname">Bassin</span>     <div class="ptags2"><span class="pt ptdc">DC+1</span><span class="pt ptdm">x1.0</span></div></div>
+              <div id="pb-jambe_g" class="pbtn" onclick="selPart('jambe_g')"><span class="pname">Jambe g.</span>   <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-jambe_d" class="pbtn" onclick="selPart('jambe_d')"><span class="pname">Jambe d.</span>   <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
             </div>
           </div>
           <div class="dicerow">
             <div class="df"><label>Resultat d20</label><input id="inp-d20" type="number" min="1" max="20" placeholder="1-20" oninput="computeResult()"/></div>
-            <div class="df"><label>Degats (resultat des)</label><input id="inp-dmg" type="number" min="0" placeholder="ex: 6" oninput="computeResult()"/></div>
+            <div class="df"><label>Degats (des)</label><input id="inp-dmg" type="number" min="0" placeholder="ex: 6" oninput="computeResult()"/></div>
           </div>
-          <div class="rbox" id="result-box"><span class="dim">Selectionne attaquant → cible → partie → entre les des</span></div>
-          <button class="btn btn-green btn-blk" id="confirm-btn" onclick="confirmAttack()" disabled>CONFIRMER L'ATTAQUE</button>
+          <div class="rbox" id="result-box"><span class="dim">Selectionne ta cible → partie du corps → entre les des</span></div>
+          <button class="btn btn-green" id="confirm-btn" onclick="confirmAttack()" disabled style="width:100%">CONFIRMER MON ATTAQUE</button>
         </div>
         <div class="card">
           <div class="ctitle">JOURNAL</div>
@@ -948,21 +1510,20 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
       </div>
     </div>
 
-    <!-- INITIATIVE -->
-    <div class="ppnl" id="pp-init">
-      <div class="card"><div class="ctitle">ORDRE D'INITIATIVE</div><div id="init-player"></div></div>
+    <div class="ppnl" id="pp-profile">
+      <div class="card" style="max-width:600px;margin:0 auto">
+        <div id="profile-content"><div class="empty">Chargement...</div></div>
+      </div>
     </div>
 
-    <!-- LOG -->
     <div class="ppnl" id="pp-log">
       <div class="card"><div class="ctitle">JOURNAL DE COMBAT</div><div id="log-player" class="llist" style="max-height:none"></div></div>
     </div>
 
   </div>
-
   <div id="chat-float">
     <div id="chat-hdr" onclick="toggleChat()">
-      <div id="chat-htitle">CHAT SESSION <span id="chat-badge">!</span></div>
+      <div id="chat-htitle">CHAT <span id="chat-badge">!</span></div>
       <button id="chat-tog">▼</button>
     </div>
     <div id="chat-body">
@@ -976,14 +1537,42 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 <div id="combat-popup">
   <div class="popbox">
     <div class="poptitle">COMBAT LANCE !</div>
-    <div class="popsub">Le Game Master a demarre le combat.<br>Rejoins pour participer !</div>
+    <div class="popsub">Le GM a demarre le combat.<br>Rejoins pour combattre !</div>
     <div class="popbtns">
-      <button class="btn btn-green" onclick="joinCombat()">REJOINDRE</button>
+      <button class="btn btn-green" onclick="document.getElementById('combat-popup').classList.remove('show');showPlayerTab('combat')">REJOINDRE</button>
       <button class="btn btn-gray btn-sm" onclick="document.getElementById('combat-popup').classList.remove('show')">Plus tard</button>
     </div>
   </div>
 </div>
 
+<!-- DICE ANIMATION OVERLAY -->
+<div id="dice-overlay">
+  <div class="dice-label">TIRAGE D'INITIATIVE</div>
+  <div class="dice-box"><div id="dice-face">20</div></div>
+  <div class="dice-label">LES DES ROULENT...</div>
+</div>
+
 <div id="toast"></div>
+
+<script>
+// Patch loadCampaigns to show username
+const orig = window.joinSession;
+document.addEventListener('DOMContentLoaded', () => {
+  const uEl = document.getElementById('camp-username');
+  if (uEl && window.ME?.username) uEl.textContent = window.ME.username;
+});
+// Override show to update username display
+const origShow = window.show || function(){};
+window.show = function(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  const el = document.getElementById(id);
+  if (el) el.classList.add('active');
+  if (id === 'screen-campaigns') {
+    const uEl = document.getElementById('camp-username');
+    if (uEl && window.ME?.username) uEl.textContent = window.ME.username;
+    if (window.loadCampaigns) window.loadCampaigns();
+  }
+};
+</script>
 </body>
 </html>

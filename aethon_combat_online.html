@@ -3,1174 +3,987 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AETHON — Combat Multijoueur</title>
-<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;900&family=Share+Tech+Mono&family=Crimson+Pro:ital,wght@0,300;0,400;0,600;1,300;1,400&display=swap" rel="stylesheet">
-
-<!-- ═══════════════════════════════════════════════════════
-  FIREBASE SETUP — INSTRUCTIONS INTÉGRÉES
-  
-  ÉTAPE 1 : Va sur https://console.firebase.google.com
-  ÉTAPE 2 : Clique "Create a project" → donne un nom (ex: "aethon-dnd")
-  ÉTAPE 3 : Désactive Google Analytics (pas nécessaire) → "Create project"
-  ÉTAPE 4 : Dans le menu gauche → "Realtime Database" → "Create database"
-             Choisis "Start in test mode" → "Enable"
-  ÉTAPE 5 : Clique sur l'icône </> (Web) dans "Project Overview"
-             Donne un nom à ton app → "Register app"
-  ÉTAPE 6 : Copie les valeurs de firebaseConfig ci-dessous
-  
-  REMPLACE LES VALEURS "VOTRE_..." PAR LES TIENNES :
-════════════════════════════════════════════════════════ -->
-
+<title>AETHON COMBAT</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;900&family=Share+Tech+Mono&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-import { getDatabase, ref, set, get, onValue, push, update, remove, off }
-  from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+import { getDatabase, ref, set, get, onValue, push, update, remove, off } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 
-// ▼▼▼ COLLEZ VOS VALEURS FIREBASE ICI ▼▼▼
 const firebaseConfig = {
-  apiKey: "AIzaSyCRaTm5QIskDXX53zTEPo6pE9P1tPm6zWw",
-  authDomain: "dndproject-9f881.firebaseapp.com",
-  databaseURL: "https://dndproject-9f881-default-rtdb.firebaseio.com",
-  projectId: "dndproject-9f881",
-  storageBucket: "dndproject-9f881.firebasestorage.app",
-  messagingSenderId: "309499797158",
-  appId: "1:309499797158:web:27e831ad1df9e672acde67"
+  apiKey:"AIzaSyCRaTm5QIskDXX53zTEPo6pE9P1tPm6zWw",
+  authDomain:"dndproject-9f881.firebaseapp.com",
+  databaseURL:"https://dndproject-9f881-default-rtdb.firebaseio.com",
+  projectId:"dndproject-9f881",
+  storageBucket:"dndproject-9f881.firebasestorage.app",
+  messagingSenderId:"309499797158",
+  appId:"1:309499797158:web:27e831ad1df9e672acde67"
 };
-// ▲▲▲ FIN DE LA CONFIGURATION ▲▲▲
 
 const app = initializeApp(firebaseConfig);
-const db  = getDatabase(app);
+const db = getDatabase(app);
 
-// ═══════════════════════════════════════════════════════════════════
-// STATE LOCAL
-// ═══════════════════════════════════════════════════════════════════
-let ME = { name: '', role: '', sessionId: '' };
-let SESSION = null;
-let unsubscribers = [];
-let pendingAttack = null;
-let selectedPart  = 'torse';
-let attackerId    = null;
-let targetId      = null;
+let ME = {name:'',role:'',sessionId:''};
+let SESSION = {};
+let listeners = [];
+let attackerId = null, targetId = null, selPart = 'torse', pendingAtk = null;
+let chatOpen = true, lastChatTs = 0;
 
-// ═══════════════════════════════════════════════════════════════════
-// BODY PARTS
-// ═══════════════════════════════════════════════════════════════════
 const PARTS = {
-  tete:    { name:'Tête',          dcMod:4,  dmgMult:1.5,  hpKillPct:0.30, isCrit:true,  critFx:'ASSOMMÉ (CD14 CON)',      killFx:'Fracture du crâne — mort',      flavor:'frappe la tête de',    critFlavor:'écrase le crâne de'    },
-  cou:     { name:'Cou',           dcMod:6,  dmgMult:2.0,  hpKillPct:0.25, isCrit:true,  critFx:'DÉCAPITATION instantanée',killFx:'Gorge tranchée — mort',         flavor:'tranche le cou de',    critFlavor:'décapite',              instantKill:true },
-  torse:   { name:'Torse',         dcMod:0,  dmgMult:1.0,  hpKillPct:0,    isCrit:false, critFx:'Perforation organe ×1.5', killFx:'Coup fatal au torse',           flavor:'frappe le torse de',   critFlavor:'perfore le torse de'   },
-  bras_g:  { name:'Bras gauche',   dcMod:2,  dmgMult:0.75, hpKillPct:0,    isCrit:false, critFx:'DÉSARMÉ (CD13 FOR)',      killFx:'Bras arraché',                  flavor:'blesse le bras g. de', critFlavor:'brise le bras de'      },
-  bras_d:  { name:'Bras droit',    dcMod:2,  dmgMult:0.75, hpKillPct:0,    isCrit:false, critFx:'DÉSARMÉ (CD13 FOR)',      killFx:'Bras arraché',                  flavor:'blesse le bras d. de', critFlavor:'brise le bras de'      },
-  bassin:  { name:'Bassin',        dcMod:1,  dmgMult:1.0,  hpKillPct:0,    isCrit:false, critFx:'VITESSE÷2 (CD12 CON)',    killFx:'Bassin fracassé',               flavor:'frappe le bassin de',  critFlavor:'fracture le bassin de' },
-  jambe_g: { name:'Jambe gauche',  dcMod:2,  dmgMult:0.75, hpKillPct:0,    isCrit:false, critFx:'ENTRAVÉ vitesse=0',       killFx:'Jambe brisée — effondrement',   flavor:'frappe la jambe g. de',critFlavor:'brise la jambe de'     },
-  jambe_d: { name:'Jambe droite',  dcMod:2,  dmgMult:0.75, hpKillPct:0,    isCrit:false, critFx:'ENTRAVÉ vitesse=0',       killFx:'Jambe brisée — effondrement',   flavor:'frappe la jambe d. de',critFlavor:'brise la jambe de'     },
+  tete:    {name:'Tete',        dcMod:4,  mult:1.5,  killPct:.30,crit:true, fx:'ASSOMME (CD14 CON)',    kfx:'Crane fracasse - mort',   instantKill:false},
+  cou:     {name:'Cou',         dcMod:6,  mult:2.0,  killPct:.25,crit:true, fx:'DECAPITATION',          kfx:'Gorge tranchee - mort',   instantKill:true},
+  torse:   {name:'Torse',       dcMod:0,  mult:1.0,  killPct:0,  crit:false,fx:'Perforation x1.5',      kfx:'Coup fatal au torse',     instantKill:false},
+  bras_g:  {name:'Bras gauche', dcMod:2,  mult:.75,  killPct:0,  crit:false,fx:'DESARME (CD13 FOR)',     kfx:'Bras arrache',            instantKill:false},
+  bras_d:  {name:'Bras droit',  dcMod:2,  mult:.75,  killPct:0,  crit:false,fx:'DESARME (CD13 FOR)',     kfx:'Bras arrache',            instantKill:false},
+  bassin:  {name:'Bassin',      dcMod:1,  mult:1.0,  killPct:0,  crit:false,fx:'VITESSE/2 (CD12 CON)',   kfx:'Bassin fracasse',         instantKill:false},
+  jambe_g: {name:'Jambe g.',    dcMod:2,  mult:.75,  killPct:0,  crit:false,fx:'ENTRAVE vitesse=0',      kfx:'Jambe brisee',            instantKill:false},
+  jambe_d: {name:'Jambe d.',    dcMod:2,  mult:.75,  killPct:0,  crit:false,fx:'ENTRAVE vitesse=0',      kfx:'Jambe brisee',            instantKill:false},
 };
 
-// ═══════════════════════════════════════════════════════════════════
-// FIREBASE HELPERS
-// ═══════════════════════════════════════════════════════════════════
-const sRef  = (path) => ref(db, `sessions/${ME.sessionId}/${path}`);
-const dbSet = (path, val) => set(sRef(path), val);
-const dbUpd = (path, val) => update(sRef(path), val);
-const dbPush= (path, val) => push(sRef(path), val);
-const dbGet = (path) => get(sRef(path)).then(s => s.val());
+const sRef  = p => ref(db,`sessions/${ME.sessionId}/${p}`);
+const dbSet = (p,v) => set(sRef(p),v);
+const dbUpd = (p,v) => update(sRef(p),v);
+const dbPush= (p,v) => push(sRef(p),v);
+const dbDel = p => remove(sRef(p));
 
-function listen(path, cb) {
-  const r = sRef(path);
-  onValue(r, snap => cb(snap.val()));
-  unsubscribers.push(() => off(r));
+function listen(path,cb){
+  const r=sRef(path);
+  onValue(r,snap=>cb(snap.val()));
+  listeners.push(r);
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// SCREENS
-// ═══════════════════════════════════════════════════════════════════
-function show(id) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+function show(id){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
 }
 
-// ─── LANDING ──────────────────────────────────────────────────────
-window.joinAsRole = async function(role) {
-  const name = document.getElementById('playerName').value.trim();
-  const sid  = document.getElementById('sessionCode').value.trim().toUpperCase();
-  if (!name) { toast('Entre ton nom'); return; }
-  if (!sid)  { toast('Entre le code de session'); return; }
-
-  ME = { name, role, sessionId: sid };
-  localStorage.setItem('aethon_me', JSON.stringify(ME));
-
-  if (role === 'dm') {
-    // DM creates/takes ownership of session
-    const existing = await get(ref(db, `sessions/${sid}`)).then(s => s.val());
-    if (!existing) {
-      await set(ref(db, `sessions/${sid}`), {
-        meta: { turn: 1, phase: 'setup', createdAt: Date.now(), dmName: name },
-        combatants: {},
-        log: {},
-        chat: {},
-        initiative: {}
+window.joinSession = async function(role){
+  const name=document.getElementById('inp-name').value.trim();
+  const sid=document.getElementById('inp-sid').value.trim().toUpperCase();
+  if(!name){toast('Entre ton nom');return;}
+  if(!sid){toast('Entre le code de session');return;}
+  ME={name,role,sessionId:sid};
+  localStorage.setItem('aethon_me',JSON.stringify(ME));
+  if(role==='dm'){
+    const ex=await get(ref(db,`sessions/${sid}`)).then(s=>s.val());
+    if(!ex){
+      await set(ref(db,`sessions/${sid}`),{
+        meta:{turn:1,phase:'lobby',dmName:name,combatId:null},
+        enemies:{},players:{},log:{},chat:{}
       });
     }
+    show('screen-dm');
   } else {
-    // Player registers
-    await set(ref(db, `sessions/${sid}/players/${name}`), { name, joinedAt: Date.now(), online: true });
+    const ex=await get(ref(db,`sessions/${sid}`)).then(s=>s.val());
+    if(!ex){toast('Session introuvable');return;}
+    await dbSet(`players/${name}`,{name,online:true,joinedAt:Date.now()});
+    show('screen-player');
   }
-
-  show(role === 'dm' ? 'screen-dm' : 'screen-player');
-  initSession();
+  initListeners();
+  updateHeaders();
 };
 
-// ─── INIT SESSION LISTENERS ───────────────────────────────────────
-function initSession() {
-  // Listen meta
-  listen('meta', meta => {
-    if (!meta) return;
-    SESSION = SESSION || {};
-    SESSION.meta = meta;
-    document.getElementById('turnBadge')   ?.textContent && (document.getElementById('turnBadge').textContent = `TOUR ${meta.turn}`);
-    document.querySelectorAll('.turn-num').forEach(e => e.textContent = meta.turn);
+function initListeners(){
+  listen('meta',meta=>{
+    if(!meta)return;
+    SESSION.meta=meta;
+    document.querySelectorAll('.turn-num').forEach(e=>e.textContent=meta.turn||1);
+    handlePhase(meta.phase);
   });
-
-  // Listen combatants
-  listen('combatants', data => {
-    SESSION = SESSION || {};
-    SESSION.combatants = data || {};
-    renderCombatants();
-    renderInitiative();
-  });
-
-  // Listen log
-  listen('log', data => {
-    SESSION = SESSION || {};
-    SESSION.log = data || {};
-    renderLog();
-  });
-
-  // Listen chat
-  listen('chat', data => {
-    SESSION = SESSION || {};
-    SESSION.chat = data || {};
+  listen('enemies',d=>{SESSION.enemies=d||{};renderAll();});
+  listen('players',d=>{SESSION.players=d||{};renderAll();});
+  listen('log',d=>{SESSION.log=d||{};renderLog();});
+  listen('chat',d=>{
+    SESSION.chat=d||{};
+    const arr=Object.values(SESSION.chat).sort((a,b)=>a.ts-b.ts);
+    const newest=arr.length?arr[arr.length-1].ts:0;
+    if(newest>lastChatTs&&lastChatTs>0) playChatSound();
+    lastChatTs=newest;
     renderChat();
   });
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// DM — SETUP COMBATANTS
-// ═══════════════════════════════════════════════════════════════════
-window.addCombatant = async function() {
-  const name = document.getElementById('cName').value.trim();
-  const type = document.getElementById('cType').value;
-  const ca   = parseInt(document.getElementById('cCA').value)  || 12;
-  const pvMax= parseInt(document.getElementById('cPV').value)  || 20;
-  const init = parseInt(document.getElementById('cInit').value)|| 0;
+function handlePhase(phase){
+  if(!phase)return;
+  const ph=document.getElementById('dm-phase');
+  if(ph){
+    ph.textContent=phase==='lobby'?'LOBBY':phase==='combat'?'COMBAT EN COURS':'COMBAT TERMINE';
+    ph.className='hdr-phase phase-'+phase;
+  }
+  if(ME.role==='player'){
+    const popup=document.getElementById('combat-popup');
+    if(popup) popup.classList.toggle('show',phase==='combat');
+    document.getElementById('plp-lobby')?.classList.toggle('active',phase==='lobby');
+  }
+}
 
-  if (!name) { toast('Nom requis'); return; }
+function updateHeaders(){
+  document.querySelectorAll('.session-id').forEach(e=>e.textContent='SESSION: '+ME.sessionId);
+  document.querySelectorAll('.my-name').forEach(e=>e.textContent=ME.name);
+}
 
-  const id = Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-  await dbSet(`combatants/${id}`, {
-    id, name, type, ca, pvMax, pvCur: pvMax,
-    init, statusEffects: [], dead: false
-  });
-  toast(`${name} ajouté`);
-  document.getElementById('cName').value = '';
+function renderAll(){
+  renderEnemyList();
+  renderPlayerList();
+  renderCombatCards();
+  renderInitiative();
+}
+
+window.addEnemy = async function(){
+  const name=document.getElementById('e-name').value.trim();
+  const ca=parseInt(document.getElementById('e-ca').value)||12;
+  const pv=parseInt(document.getElementById('e-pv').value)||20;
+  const init=parseInt(document.getElementById('e-init').value)||0;
+  if(!name){toast('Nom requis');return;}
+  const id='e_'+Date.now().toString(36);
+  await dbSet(`enemies/${id}`,{id,name,ca,pvMax:pv,pvCur:pv,init,dead:false,statusEffects:[],type:'enemy'});
+  document.getElementById('e-name').value='';
+  toast(name+' ajoute');
 };
 
-window.removeCombatant = async function(id) {
-  await remove(sRef(`combatants/${id}`));
-};
+window.removeEnemy = async function(id){ await dbDel(`enemies/${id}`); };
 
-window.loadPresetDM = function(key) {
-  const P = {
-    soldier:{ name:'Soldat Maren',       type:'enemy', ca:14, pv:16, init:0  },
-    hunter: { name:'Chasseur Concordia', type:'enemy', ca:13, pv:22, init:2  },
-    whisper:{ name:'Susurro Concordia',  type:'enemy', ca:12, pv:18, init:2  },
-    wren:   { name:'Wren Aldis',         type:'ally',  ca:13, pv:28, init:3  },
+window.loadPreset = function(k){
+  const P={
+    soldier:{name:'Soldat Maren',ca:14,pv:16,init:0},
+    hunter:{name:'Chasseur Concordia',ca:13,pv:22,init:2},
+    whisper:{name:'Susurro',ca:12,pv:18,init:2},
+    guard:{name:'Garde royal',ca:15,pv:14,init:1},
+    bandit:{name:'Bandit',ca:11,pv:10,init:1},
+    troll:{name:'Troll',ca:15,pv:84,init:-1}
   };
-  const p = P[key]; if(!p) return;
-  document.getElementById('cName').value = p.name;
-  document.getElementById('cType').value = p.type;
-  document.getElementById('cCA').value   = p.ca;
-  document.getElementById('cPV').value   = p.pv;
-  document.getElementById('cInit').value = p.init;
+  const p=P[k];if(!p)return;
+  document.getElementById('e-name').value=p.name;
+  document.getElementById('e-ca').value=p.ca;
+  document.getElementById('e-pv').value=p.pv;
+  document.getElementById('e-init').value=p.init;
 };
 
-window.startCombat = async function() {
-  const combs = SESSION?.combatants;
-  if (!combs || !Object.keys(combs).length) { toast('Ajoute des combattants'); return; }
-  await dbSet('meta/phase', 'combat');
-  toast('⚔ Combat lancé !');
+function renderEnemyList(){
+  const el=document.getElementById('enemy-list');if(!el)return;
+  const arr=Object.values(SESSION.enemies||{});
+  if(!arr.length){el.innerHTML='<div class="empty">Aucun ennemi</div>';return;}
+  el.innerHTML=arr.map(e=>`<div class="setup-row">
+    <span class="sname">${e.name}</span>
+    <span class="sstat">CA ${e.ca}</span>
+    <span class="sstat">PV ${e.pvMax}</span>
+    <span class="sstat">Init +${e.init}</span>
+    <button class="btn-icon" onclick="removeEnemy('${e.id}')">X</button>
+  </div>`).join('');
+}
+
+function renderPlayerList(){
+  const el=document.getElementById('player-list');if(!el)return;
+  const arr=Object.values(SESSION.players||{});
+  if(!arr.length){el.innerHTML='<div class="empty">En attente de joueurs...</div>';return;}
+  el.innerHTML=arr.map(p=>`<div class="setup-row">
+    <span class="sname">◈ ${p.name}</span>
+    <span class="sstat">${p.class||'?'}</span>
+    <span class="sstat">CA ${p.ca||'?'}</span>
+    <span class="sstat">PV ${p.pvMax||'?'}</span>
+    <span class="sstat ${p.ready?'rdy-yes':'rdy-no'}">${p.ready?'PRET':'ATTENTE'}</span>
+  </div>`).join('');
+}
+
+window.saveMyChar = async function(){
+  const name=ME.name;
+  const ca=parseInt(document.getElementById('p-ca').value)||10;
+  const pv=parseInt(document.getElementById('p-pv').value)||20;
+  const init=parseInt(document.getElementById('p-init').value)||0;
+  const cls=document.getElementById('p-class').value.trim()||'Aventurier';
+  await dbSet(`players/${name}`,{name,ca,pvMax:pv,pvCur:pv,init,class:cls,online:true,ready:true,dead:false,statusEffects:[],type:'ally'});
+  toast('Personnage sauvegarde!');
+  const badge=document.getElementById('saved-badge');
+  if(badge)badge.style.display='block';
+};
+
+window.startCombat = async function(){
+  const en=SESSION.enemies||{},pl=SESSION.players||{};
+  if(!Object.keys(en).length){toast('Ajoute des ennemis');return;}
+  if(!Object.keys(pl).length){toast('Aucun joueur connecte');return;}
+  const combatId='c_'+Date.now().toString(36);
+  await dbUpd('meta',{phase:'combat',turn:1,combatId,startedAt:Date.now()});
+  const upd={};
+  Object.values(en).forEach(e=>{upd[`enemies/${e.id}/pvCur`]=e.pvMax;upd[`enemies/${e.id}/dead`]=false;upd[`enemies/${e.id}/statusEffects`]=[];});
+  Object.values(pl).forEach(p=>{upd[`players/${p.name}/pvCur`]=p.pvMax;upd[`players/${p.name}/dead`]=false;upd[`players/${p.name}/statusEffects`]=[];});
+  await update(ref(db,`sessions/${ME.sessionId}`),upd);
+  await dbSet('log',{});
+  toast('Combat lance!');
   showDMTab('combat');
 };
 
-window.endTurn = async function() {
-  const cur = (SESSION?.meta?.turn || 1) + 1;
-  await dbUpd('meta', { turn: cur });
-  toast(`Tour ${cur} commencé`);
+window.endCombat = async function(){
+  if(!confirm('Terminer le combat?'))return;
+  await dbUpd('meta',{phase:'ended'});
+  toast('Combat termine');
 };
 
-window.resetCombat = async function() {
-  if (!confirm('Réinitialiser les PV de tous ?')) return;
-  const combs = SESSION?.combatants || {};
-  const updates = {};
-  Object.keys(combs).forEach(id => {
-    updates[`combatants/${id}/pvCur`]        = combs[id].pvMax;
-    updates[`combatants/${id}/dead`]         = false;
-    updates[`combatants/${id}/statusEffects`]= [];
-  });
-  updates['meta/turn'] = 1;
-  await update(sRef(''), updates);
-  toast('Combat réinitialisé');
+window.quitCombat = async function(){
+  if(!confirm('Quitter le combat?'))return;
+  await dbUpd('meta',{phase:'lobby'});
+  toast('Combat quitte');
 };
 
-// ═══════════════════════════════════════════════════════════════════
-// ATTACK RESOLUTION (shared DM + Player)
-// ═══════════════════════════════════════════════════════════════════
-function selectAttacker(id) {
-  attackerId = id;
-  refreshAttackPanel();
+window.nextTurn = async function(){
+  const cur=(SESSION.meta?.turn||1)+1;
+  await dbSet('meta/turn',cur);
+  toast('Tour '+cur);
+};
+
+window.joinCombat = function(){
+  document.getElementById('combat-popup').classList.remove('show');
+  showPlayerTab('combat');
+};
+
+function getAllCombatants(){
+  const e=Object.values(SESSION.enemies||{});
+  const p=Object.values(SESSION.players||{});
+  return [...e,...p].sort((a,b)=>(b.init||0)-(a.init||0));
 }
 
-function selectTarget(id) {
-  targetId = id;
-  refreshAttackPanel();
-}
-
-window.selectCombatantCard = function(id) {
-  const combs = SESSION?.combatants || {};
-  const c = combs[id];
-  if (!c || c.dead) return;
-
-  if (!attackerId) {
-    attackerId = id;
-  } else if (attackerId === id) {
-    attackerId = null;
-  } else if (!targetId) {
-    targetId = id;
-  } else if (targetId === id) {
-    targetId = null;
-  } else {
-    targetId = id;
-  }
-  refreshCombatantCards();
-  refreshAttackPanel();
-};
-
-window.selectPart = function(partKey) {
-  selectedPart = partKey;
-  document.querySelectorAll('.part-btn').forEach(b => b.classList.remove('sel','sel-crit'));
-  const btn = document.getElementById('pb-' + partKey);
-  if (btn) btn.classList.add(PARTS[partKey].isCrit ? 'sel-crit' : 'sel');
-  document.querySelectorAll('.svg-part').forEach(s => s.classList.remove('svg-sel'));
-  const sv = document.getElementById('sv-' + partKey);
-  if (sv) sv.classList.add('svg-sel');
-  computeResult();
-};
-
-window.computeResult = function() {
-  const d20  = parseInt(document.getElementById('rollD20')?.value);
-  const dmgR = parseInt(document.getElementById('rollDmg')?.value);
-  if (!attackerId || !targetId) return;
-  const combs = SESSION?.combatants || {};
-  const atk   = combs[attackerId];
-  const tgt   = combs[targetId];
-  if (!atk || !tgt) return;
-
-  const part     = PARTS[selectedPart];
-  const isCrit   = d20 === 20;
-  const isFumble = d20 === 1;
-  const required = tgt.ca + part.dcMod;
-  const isHit    = !isNaN(d20) && (isCrit || (!isFumble && d20 >= required));
-
-  let dmg = 0;
-  if (isHit && !isNaN(dmgR)) {
-    dmg = Math.round(dmgR * part.dmgMult * (isCrit ? 2 : 1));
-    dmg = Math.max(0, dmg);
-  }
-
-  const hpAfter  = Math.max(0, tgt.pvCur - dmg);
-  const wouldKill= isHit && (hpAfter <= 0 || (part.instantKill && isCrit) || (part.hpKillPct > 0 && isCrit && tgt.pvCur <= tgt.pvMax * part.hpKillPct));
-  const resultType = isFumble ? 'fumble' : !isHit ? 'miss' : wouldKill ? 'kill' : isCrit ? 'crit' : 'hit';
-
-  const labels = { hit:'TOUCHÉ', miss:'RATÉ', crit:'CRITIQUE !', kill:'COUP FATAL', fumble:'FUMBLE' };
-  const colors = { hit:'#3dba63', miss:'#888', crit:'#e8b84b', kill:'#cc3333', fumble:'#cc3333' };
-
-  // Update display
-  ['resultType','resultDmg','resultHP'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-  });
-
-  const resEl = document.getElementById('attackResult');
-  if (resEl) {
-    let html = '';
-    if (isNaN(d20)) {
-      html = `<span style="color:var(--dim)">Entre ton jet de d20 pour calculer</span>`;
-    } else if (!isHit) {
-      html = `<strong style="color:#888">RATÉ</strong> — ${d20} + bonus = ${d20} vs CA ${required} (CA ${tgt.ca} + zone +${part.dcMod})`;
-    } else {
-      html = `<strong style="color:${colors[resultType]}">${labels[resultType]}</strong>`;
-      if (!isNaN(dmgR)) html += ` — <strong style="color:${colors[resultType]}">${dmg} dégâts</strong>`;
-      if (isHit && !isNaN(dmgR)) html += `<br><span style="font-size:12px;color:var(--dim)">${tgt.name} : ${tgt.pvCur} → ${hpAfter} PV</span>`;
-      if (isCrit) html += `<br><em style="color:var(--purple);font-size:12px">${part.critFx}</em>`;
-      if (wouldKill) html += `<br><strong style="color:var(--red);font-size:12px">☠ ${part.killFx}</strong>`;
-    }
-    resEl.innerHTML = html;
-  }
-
-  pendingAttack = { d20, dmgR, dmg, isHit, isCrit, isFumble, wouldKill, resultType, required, hpAfter, part, atk, tgt };
-  const btn = document.getElementById('confirmBtn');
-  if (btn) btn.disabled = isNaN(d20) || isNaN(dmgR) || d20 < 1 || d20 > 20;
-};
-
-window.confirmAttack = async function() {
-  if (!pendingAttack) return;
-  const p = pendingAttack;
-  const turn = SESSION?.meta?.turn || 1;
-
-  // Apply HP change
-  const updates = {};
-  if (p.isHit) {
-    updates[`combatants/${p.tgt.id}/pvCur`] = p.hpAfter;
-    if (p.wouldKill) {
-      updates[`combatants/${p.tgt.id}/dead`]          = true;
-      updates[`combatants/${p.tgt.id}/statusEffects`] = ['MORT'];
-    } else if (p.isCrit && p.part.critFx) {
-      const cur = p.tgt.statusEffects || [];
-      const short = p.part.critFx.split(' (')[0];
-      if (!cur.includes(short)) {
-        updates[`combatants/${p.tgt.id}/statusEffects`] = [...cur, short];
-      }
-    }
-  }
-
-  // Build log entry
-  const entry = {
-    turn,
-    by:     ME.name,
-    atk:    p.atk.name,
-    tgt:    p.tgt.name,
-    part:   p.part.name,
-    d20:    p.d20,
-    dmg:    p.dmg,
-    type:   p.resultType,
-    hpLeft: p.hpAfter,
-    hpMax:  p.tgt.pvMax,
-    ts:     Date.now()
-  };
-
-  await update(ref(db, `sessions/${ME.sessionId}`), updates);
-  await dbPush('log', entry);
-
-  // Reset
-  pendingAttack = null;
-  attackerId    = null;
-  targetId      = null;
-  document.getElementById('rollD20').value = '';
-  document.getElementById('rollDmg').value = '';
-  if (document.getElementById('attackResult'))
-    document.getElementById('attackResult').innerHTML = `<span style="color:var(--dim)">Sélectionne attaquant → cible → partie du corps → entre les dés</span>`;
-  if (document.getElementById('confirmBtn'))
-    document.getElementById('confirmBtn').disabled = true;
-
-  refreshCombatantCards();
-  refreshAttackPanel();
-  toast(p.wouldKill ? `☠ ${p.tgt.name} est mort !` : p.isHit ? `⚔ ${p.dmg} dégâts sur ${p.tgt.name}` : `Attaque ratée`);
-};
-
-// ═══════════════════════════════════════════════════════════════════
-// RENDER COMBATANTS
-// ═══════════════════════════════════════════════════════════════════
-function renderCombatants() {
-  refreshCombatantCards();
-  // DM setup list
-  const dmList = document.getElementById('dmCombatantList');
-  if (dmList) {
-    const combs = SESSION?.combatants || {};
-    const arr   = Object.values(combs);
-    if (!arr.length) { dmList.innerHTML = `<div class="empty">Aucun combattant ajouté</div>`; return; }
-    dmList.innerHTML = arr.map(c => `
-      <div class="setup-card ${c.type}">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <div>
-            <span class="type-badge ${c.type}">${c.type==='ally'?'ALLIÉ':'ENNEMI'}</span>
-            <span class="cname">${c.name}</span>
-          </div>
-          <button class="btn-icon" onclick="removeCombatant('${c.id}')">✕</button>
+function renderCombatCards(){
+  const isDM=ME.role==='dm';
+  const all=getAllCombatants();
+  ['comb-dm','comb-player'].forEach(id=>{
+    const el=document.getElementById(id);if(!el)return;
+    if(!all.length){el.innerHTML='<div class="empty">Aucun combattant</div>';return;}
+    el.innerHTML=all.map(c=>{
+      const cid=c.type==='ally'?c.name:c.id;
+      const isAtk=attackerId===cid, isTgt=targetId===cid;
+      const dead=c.dead||c.pvCur<=0;
+      const pct=Math.max(0,(c.pvCur/c.pvMax)*100);
+      const hpcol=pct>60?'#3dba63':pct>25?'#e8b84b':'#cc3333';
+      const showHP=isDM||c.type==='ally';
+      const showCA=isDM||c.type==='ally';
+      const estate=!isDM&&c.type==='enemy'?(dead?'X MORT':pct>75?'En forme':pct>40?'Blesse':pct>10?'Critique':'Agonie'):'';
+      return `<div class="ccard ${c.type} ${isAtk?'is-atk':''} ${isTgt?'is-tgt':''} ${dead?'is-dead':''}" onclick="ccClick('${cid}','${c.type}')">
+        <div class="ctop">
+          <div><span class="tbdg ${c.type}">${c.type==='ally'?'ALLIE':'ENNEMI'}</span> <span class="cname">${dead?'X ':''}${c.name}</span></div>
+          <span class="catag">${showCA?'CA '+c.ca:'CA ?'}</span>
         </div>
-        <div class="mini-stats">CA ${c.ca} · PV ${c.pvCur}/${c.pvMax} · Init +${c.init}</div>
-        ${renderHPBar(c)}
-      </div>`).join('');
-  }
-}
-
-function refreshCombatantCards() {
-  const combs = SESSION?.combatants || {};
-  const arr   = Object.values(combs).sort((a,b) => b.init - a.init);
-  const isDM  = ME.role === 'dm';
-
-  const containers = ['combatListDM','combatListPlayer'];
-  containers.forEach(cid => {
-    const el = document.getElementById(cid);
-    if (!el) return;
-    if (!arr.length) { el.innerHTML = `<div class="empty">Aucun combattant</div>`; return; }
-    el.innerHTML = arr.map(c => {
-      const isAtk = attackerId === c.id;
-      const isTgt = targetId   === c.id;
-      const cls   = ['comb-card', c.type, isAtk?'is-atk':'', isTgt?'is-tgt':'', c.dead?'is-dead':''].join(' ');
-      const pct   = Math.max(0, c.pvCur / c.pvMax * 100);
-      const hpColor = pct > 60 ? '#3dba63' : pct > 25 ? '#e8b84b' : '#cc3333';
-
-      // For players: hide enemy CA and exact HP
-      const showStats = isDM || c.type === 'ally';
-      const pvDisplay = isDM
-        ? `${c.pvCur} / ${c.pvMax}`
-        : c.type === 'ally' ? `${c.pvCur} / ${c.pvMax}` : '???';
-      const caDisplay = isDM ? `CA ${c.ca}` : c.type === 'ally' ? `CA ${c.ca}` : 'CA ?';
-      // Show approximate HP state to players for enemies
-      const enemyState = !isDM && c.type === 'enemy'
-        ? (c.dead ? '☠ MORT' : pct > 75 ? '● En forme' : pct > 40 ? '◑ Blessé' : pct > 0 ? '○ Critique' : '☠ MORT')
-        : '';
-
-      return `
-        <div class="${cls}" onclick="selectCombatantCard('${c.id}')">
-          <div class="comb-header">
-            <div>
-              <span class="type-badge ${c.type}">${c.type==='ally'?'ALLIÉ':'ENNEMI'}</span>
-              <span class="cname">${c.dead?'☠ ':''}${c.name}</span>
-            </div>
-            <span class="ca-badge">${caDisplay}</span>
-          </div>
-          <div class="hp-track"><div class="hp-fill" style="width:${pct}%;background:${hpColor}"></div></div>
-          <div class="hp-text">
-            <span>PV: ${pvDisplay}</span>
-            ${enemyState ? `<span style="font-size:10px;color:${hpColor}">${enemyState}</span>` : ''}
-          </div>
-          ${c.statusEffects?.length ? `<div class="tag-row">${c.statusEffects.map(e=>`<span class="status-tag">${e}</span>`).join('')}</div>` : ''}
-          ${isAtk ? `<div class="role-label atk-label">▶ ATTAQUANT</div>` : ''}
-          ${isTgt ? `<div class="role-label tgt-label">◎ CIBLE</div>` : ''}
-        </div>`;
+        <div class="hptr"><div class="hpfl" style="width:${pct}%;background:${hpcol}"></div></div>
+        <div class="hprow">${showHP?c.pvCur+' / '+c.pvMax+' PV':estate}</div>
+        ${c.statusEffects?.length?'<div class="tagrow">'+c.statusEffects.map(s=>'<span class="stag">'+s+'</span>').join('')+'</div>':''}
+        ${isAtk?'<div class="rlbl atklbl">ATTAQUANT</div>':''}
+        ${isTgt?'<div class="rlbl tgtlbl">CIBLE</div>':''}
+      </div>`;
     }).join('');
   });
 }
 
-function renderHPBar(c) {
-  const pct = Math.max(0, c.pvCur / c.pvMax * 100);
-  const col = pct > 60 ? '#3dba63' : pct > 25 ? '#e8b84b' : '#cc3333';
-  return `<div class="hp-track"><div class="hp-fill" style="width:${pct}%;background:${col}"></div></div>`;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// RENDER ATTACK PANEL (refreshed when attacker/target change)
-// ═══════════════════════════════════════════════════════════════════
-function refreshAttackPanel() {
-  const combs = SESSION?.combatants || {};
-  const atk   = combs[attackerId];
-  const tgt   = combs[targetId];
-  const isDM  = ME.role === 'dm';
-
-  ['atkLabel','atkLabelP'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = atk ? atk.name : '— Aucun —';
-  });
-  ['tgtLabel','tgtLabelP'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = tgt ? tgt.name : '— Aucun —';
-  });
-
-  // DM: show target CA in attack panel
-  const caInfo = document.getElementById('tgtCAInfo');
-  if (caInfo) caInfo.textContent = tgt ? `CA ${tgt.ca}` : '';
-
+window.ccClick = function(cid,type){
+  if(!attackerId){attackerId=cid;}
+  else if(attackerId===cid){attackerId=null;}
+  else if(!targetId){targetId=cid;}
+  else if(targetId===cid){targetId=null;}
+  else{targetId=cid;}
+  renderCombatCards();
+  refreshAtkPanel();
   computeResult();
+};
+
+function getCombatant(cid){
+  return getAllCombatants().find(c=>c.id===cid||c.name===cid);
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// RENDER INITIATIVE
-// ═══════════════════════════════════════════════════════════════════
-function renderInitiative() {
-  const combs = SESSION?.combatants || {};
-  const arr   = Object.values(combs).sort((a,b) => b.init - a.init);
-  ['initListDM','initListPlayer'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    if (!arr.length) { el.innerHTML = `<div class="empty">Aucun combattant</div>`; return; }
-    el.innerHTML = arr.map((c,i) => `
-      <div class="init-row ${c.dead?'dead':''}">
-        <span class="init-num">${i+1}</span>
-        <span class="init-name">${c.dead?'☠ ':''}${c.name}</span>
-        <span class="init-val ${c.type}">+${c.init}</span>
-        ${c.dead?'<span style="font-size:10px;color:var(--red)">MORT</span>':''}
-      </div>`).join('');
+function renderInitiative(){
+  const all=getAllCombatants();
+  ['init-dm','init-player'].forEach(id=>{
+    const el=document.getElementById(id);if(!el)return;
+    if(!all.length){el.innerHTML='<div class="empty">Aucun combattant</div>';return;}
+    el.innerHTML=all.map((c,i)=>`<div class="irow ${c.dead?'idead':''}">
+      <span class="inum">${i+1}</span>
+      <span class="iname">${c.dead?'X ':''}${c.name}</span>
+      <span class="ival ${c.type}">+${c.init||0}</span>
+    </div>`).join('');
   });
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// RENDER LOG
-// ═══════════════════════════════════════════════════════════════════
-function renderLog() {
-  const log  = SESSION?.log || {};
-  const arr  = Object.values(log).sort((a,b) => a.ts - b.ts);
-  const isDM = ME.role === 'dm';
+function refreshAtkPanel(){
+  const atk=getCombatant(attackerId),tgt=getCombatant(targetId);
+  ['atklbl','atklbl-p'].forEach(id=>{const e=document.getElementById(id);if(e)e.textContent=atk?atk.name:'- Aucun -';});
+  ['tgtlbl','tgtlbl-p'].forEach(id=>{const e=document.getElementById(id);if(e)e.textContent=tgt?tgt.name:'- Aucun -';});
+  const ci=document.getElementById('tgt-ca');
+  if(ci)ci.textContent=tgt&&ME.role==='dm'?'CA '+tgt.ca:'';
+}
 
-  ['logListDM','logListPlayer'].forEach(lid => {
-    const el = document.getElementById(lid);
-    if (!el) return;
-    if (!arr.length) { el.innerHTML = `<div class="empty">Aucune action</div>`; return; }
-    let lastTurn = 0;
-    el.innerHTML = arr.map(e => {
-      const colors = { hit:'#3dba63', miss:'#888', crit:'#e8b84b', kill:'#cc3333', fumble:'#cc3333' };
-      const icons  = { hit:'⚔', miss:'○', crit:'✦', kill:'☠', fumble:'✗' };
-      let hdr = '';
-      if (e.turn !== lastTurn) {
-        lastTurn = e.turn;
-        hdr = `<div class="log-turn-hdr">TOUR ${e.turn}</div>`;
-      }
-      return `${hdr}<div class="log-entry log-${e.type}">
-        <span style="color:${colors[e.type]}">${icons[e.type]}</span>
+window.selPart2 = function(k){
+  selPart=k;
+  document.querySelectorAll('.pbtn').forEach(b=>b.classList.remove('sel','selc'));
+  const btn=document.getElementById('pb-'+k);if(btn)btn.classList.add(PARTS[k].crit?'selc':'sel');
+  document.querySelectorAll('.svgp').forEach(s=>s.classList.remove('svgsel'));
+  const sv=document.getElementById('sv-'+k);if(sv)sv.classList.add('svgsel');
+  computeResult();
+};
+
+window.computeResult = function(){
+  const d20=parseInt(document.getElementById('inp-d20')?.value);
+  const dmgR=parseInt(document.getElementById('inp-dmg')?.value);
+  if(!attackerId||!targetId)return;
+  const atk=getCombatant(attackerId),tgt=getCombatant(targetId);
+  if(!atk||!tgt)return;
+  const part=PARTS[selPart];
+  const isCrit=d20===20,isFumble=d20===1;
+  const req=(tgt.ca||10)+part.dcMod;
+  const isHit=!isNaN(d20)&&(isCrit||(!isFumble&&d20>=req));
+  let dmg=0;
+  if(isHit&&!isNaN(dmgR))dmg=Math.max(0,Math.round(dmgR*part.mult*(isCrit?2:1)));
+  const hpAfter=Math.max(0,(tgt.pvCur||0)-dmg);
+  const wouldKill=isHit&&(hpAfter<=0||(part.instantKill&&isCrit)||(part.killPct>0&&isCrit&&tgt.pvCur<=(tgt.pvMax||1)*part.killPct));
+  const rtype=isFumble?'fumble':!isHit?'miss':wouldKill?'kill':isCrit?'crit':'hit';
+  const cols={hit:'#3dba63',miss:'#777',crit:'#e8b84b',kill:'#cc3333',fumble:'#cc3333'};
+  const labs={hit:'TOUCHE',miss:'RATE',crit:'CRITIQUE!',kill:'COUP FATAL',fumble:'FUMBLE'};
+  const rbox=document.getElementById('result-box');
+  if(rbox){
+    if(isNaN(d20)){rbox.innerHTML='<span class="dim">Entre ton jet de d20</span>';}
+    else if(!isHit){rbox.innerHTML=`<strong style="color:#777">RATE</strong> - ${d20} vs CA ${req} (CA ${tgt.ca||'?'}+${part.dcMod})`;}
+    else{
+      let h=`<strong style="color:${cols[rtype]}">${labs[rtype]}</strong>`;
+      if(!isNaN(dmgR))h+=` - <strong style="color:${cols[rtype]}">${dmg} degats</strong>`;
+      if(isHit&&!isNaN(dmgR))h+=`<br><span class="dim">${tgt.name}: ${tgt.pvCur} → ${hpAfter} PV</span>`;
+      if(isCrit)h+=`<br><em style="color:var(--purple)">${part.fx}</em>`;
+      if(wouldKill)h+=`<br><strong style="color:var(--red)">${part.kfx}</strong>`;
+      rbox.innerHTML=h;
+    }
+  }
+  pendingAtk={d20,dmgR,dmg,isHit,isCrit,isFumble,wouldKill,rtype,req,hpAfter,part,atk,tgt};
+  const btn=document.getElementById('confirm-btn');
+  if(btn)btn.disabled=isNaN(d20)||isNaN(dmgR)||d20<1||d20>20;
+};
+
+window.confirmAttack = async function(){
+  if(!pendingAtk)return;
+  const p=pendingAtk,turn=SESSION.meta?.turn||1;
+  const tp=p.tgt.type==='ally'?`players/${p.tgt.name}`:`enemies/${p.tgt.id}`;
+  const upd={};
+  if(p.isHit){
+    upd[`${tp}/pvCur`]=p.hpAfter;
+    if(p.wouldKill){upd[`${tp}/dead`]=true;upd[`${tp}/statusEffects`]=['MORT'];}
+    else if(p.isCrit&&p.part.fx){
+      const cur=p.tgt.statusEffects||[];
+      const sh=p.part.fx.split(' (')[0];
+      if(!cur.includes(sh))upd[`${tp}/statusEffects`]=[...cur,sh];
+    }
+  }
+  const entry={turn,by:ME.name,atk:p.atk.name,tgt:p.tgt.name,part:p.part.name,d20:p.d20,dmg:p.dmg,type:p.rtype,hpLeft:p.hpAfter,hpMax:p.tgt.pvMax,ts:Date.now()};
+  await update(ref(db,`sessions/${ME.sessionId}`),upd);
+  await dbPush('log',entry);
+  pendingAtk=null;attackerId=null;targetId=null;
+  const d=document.getElementById('inp-d20');if(d)d.value='';
+  const g=document.getElementById('inp-dmg');if(g)g.value='';
+  const rb=document.getElementById('result-box');
+  if(rb)rb.innerHTML='<span class="dim">Selectionne attaquant → cible → partie → entre les des</span>';
+  const cb=document.getElementById('confirm-btn');if(cb)cb.disabled=true;
+  renderCombatCards();refreshAtkPanel();
+  toast(p.wouldKill?'X '+p.tgt.name+' est mort!':p.isHit?p.dmg+' degats sur '+p.tgt.name:'Attaque ratee');
+};
+
+function renderLog(){
+  const log=SESSION.log||{};
+  const arr=Object.values(log).sort((a,b)=>a.ts-b.ts);
+  const isDM=ME.role==='dm';
+  const cols={hit:'#3dba63',miss:'#555',crit:'#e8b84b',kill:'#cc3333',fumble:'#cc3333'};
+  const icons={hit:'[HIT]',miss:'[MISS]',crit:'[CRIT]',kill:'[KILL]',fumble:'[FUMBLE]'};
+  ['log-dm','log-player'].forEach(lid=>{
+    const el=document.getElementById(lid);if(!el)return;
+    if(!arr.length){el.innerHTML='<div class="empty">Aucune action</div>';return;}
+    let lt=0;
+    el.innerHTML=arr.map(e=>{
+      let hdr='';
+      if(e.turn!==lt){lt=e.turn;hdr=`<div class="lturn">TOUR ${e.turn}</div>`;}
+      return `${hdr}<div class="lentry l${e.type}">
+        <span style="color:${cols[e.type]||'#888'}">${icons[e.type]||'?'}</span>
         <strong>${e.atk}</strong> → <strong>${e.tgt}</strong> [${e.part}]
-        ${e.type!=='miss'&&e.type!=='fumble' ? `<strong style="color:${colors[e.type]}"> ${e.dmg} dmg</strong>` : '<span style="color:#888"> raté</span>'}
-        ${isDM ? `<span style="color:var(--dim)"> · PV ${e.hpLeft}/${e.hpMax}</span>` : ''}
-        ${e.type==='kill'?'<span style="color:var(--red)"> ☠</span>':''}
+        ${e.type!=='miss'&&e.type!=='fumble'?`<strong style="color:${cols[e.type]}"> ${e.dmg} dmg</strong>`:'<span class="dim"> rate</span>'}
+        ${isDM?`<span class="dim"> PV ${e.hpLeft}/${e.hpMax}</span>`:''}
+        ${e.type==='kill'?'<span style="color:var(--red)"> X MORT</span>':''}
       </div>`;
     }).join('');
-    el.scrollTop = el.scrollHeight;
+    el.scrollTop=el.scrollHeight;
   });
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// CHAT
-// ═══════════════════════════════════════════════════════════════════
-window.sendChat = async function(fromDM) {
-  const inputId = fromDM ? 'chatInputDM' : 'chatInputP';
-  const el = document.getElementById(inputId);
-  if (!el) return;
-  const msg = el.value.trim();
-  if (!msg) return;
-  await dbPush('chat', { from: ME.name, role: ME.role, msg, ts: Date.now() });
-  el.value = '';
-};
+function playChatSound(){
+  try{
+    const ctx=new(window.AudioContext||window.webkitAudioContext)();
+    const o=ctx.createOscillator(),g=ctx.createGain();
+    o.connect(g);g.connect(ctx.destination);
+    o.frequency.setValueAtTime(880,ctx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(440,ctx.currentTime+0.1);
+    g.gain.setValueAtTime(0.12,ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.2);
+    o.start();o.stop(ctx.currentTime+0.2);
+  }catch(e){}
+}
 
-window.chatKeydown = function(e, fromDM) {
-  if (e.key === 'Enter') sendChat(fromDM);
-};
-
-function renderChat() {
-  const chat = SESSION?.chat || {};
-  const arr  = Object.values(chat).sort((a,b) => a.ts - b.ts);
-  ['chatMsgsDM','chatMsgsP'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.innerHTML = arr.map(m => {
-      const isDM  = m.role === 'dm';
-      const isMe  = m.from === ME.name;
-      return `<div class="chat-msg ${isMe?'me':'other'}">
-        <span class="chat-from ${isDM?'dm-tag':''}">${isDM?'⚔ DM':'◈ '+m.from}</span>
-        <span class="chat-text">${m.msg}</span>
+function renderChat(){
+  const msgs=SESSION.chat||{};
+  const arr=Object.values(msgs).sort((a,b)=>a.ts-b.ts);
+  ['chat-dm','chat-p'].forEach(id=>{
+    const el=document.getElementById(id);if(!el)return;
+    el.innerHTML=arr.map(m=>{
+      const isMe=m.from===ME.name,isDMmsg=m.role==='dm';
+      return `<div class="cmsg ${isMe?'cme':'cother'}">
+        <span class="cfrom ${isDMmsg?'cdm':''}">${isDMmsg?'DM: ':m.from+': '}</span>
+        <span class="ctxt">${m.msg}</span>
       </div>`;
     }).join('');
-    el.scrollTop = el.scrollHeight;
+    el.scrollTop=el.scrollHeight;
   });
+  const badge=document.getElementById('chat-badge');
+  if(badge&&!chatOpen)badge.style.display='flex';
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// DM TAB NAV
-// ═══════════════════════════════════════════════════════════════════
-window.showDMTab = function(tab) {
-  document.querySelectorAll('.dm-tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.dm-panel').forEach(p => p.classList.remove('active'));
-  document.getElementById('dmt-'+tab)?.classList.add('active');
-  document.getElementById('dmp-'+tab)?.classList.add('active');
+window.sendChat = async function(){
+  const iid=ME.role==='dm'?'ci-dm':'ci-p';
+  const el=document.getElementById(iid);if(!el)return;
+  const msg=el.value.trim();if(!msg)return;
+  await dbPush('chat',{from:ME.name,role:ME.role,msg,ts:Date.now()});
+  el.value='';
 };
 
-window.showPlayerTab = function(tab) {
-  document.querySelectorAll('.pl-tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.pl-panel').forEach(p => p.classList.remove('active'));
-  document.getElementById('plt-'+tab)?.classList.add('active');
-  document.getElementById('plp-'+tab)?.classList.add('active');
+window.chatKey = function(e){if(e.key==='Enter')sendChat();};
+
+window.toggleChat = function(){
+  chatOpen=!chatOpen;
+  const body=document.getElementById('chat-body');
+  if(body)body.style.display=chatOpen?'flex':'none';
+  const btn=document.getElementById('chat-tog');
+  if(btn)btn.textContent=chatOpen?'▼':'▲';
+  const badge=document.getElementById('chat-badge');
+  if(badge)badge.style.display='none';
 };
 
-// ═══════════════════════════════════════════════════════════════════
-// TOAST
-// ═══════════════════════════════════════════════════════════════════
-function toast(msg) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 2800);
+window.showDMTab = function(t){
+  document.querySelectorAll('.dtab').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.dpnl').forEach(p=>p.classList.remove('active'));
+  document.getElementById('dt-'+t)?.classList.add('active');
+  document.getElementById('dp-'+t)?.classList.add('active');
+};
+
+window.showPlayerTab = function(t){
+  document.querySelectorAll('.ptab').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.ppnl').forEach(p=>p.classList.remove('active'));
+  document.getElementById('pt-'+t)?.classList.add('active');
+  document.getElementById('pp-'+t)?.classList.add('active');
+};
+
+window.toast = function(msg){
+  const el=document.getElementById('toast');
+  el.textContent=msg;el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'),2800);
+};
+
+const saved=localStorage.getItem('aethon_me');
+if(saved){
+  try{
+    const s=JSON.parse(saved);
+    if(s.name)document.getElementById('inp-name').value=s.name;
+    if(s.sessionId)document.getElementById('inp-sid').value=s.sessionId;
+  }catch(e){}
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// RESTORE SESSION from localStorage
-// ═══════════════════════════════════════════════════════════════════
-const saved = localStorage.getItem('aethon_me');
-if (saved) {
-  try {
-    const s = JSON.parse(saved);
-    document.getElementById('playerName').value  = s.name || '';
-    document.getElementById('sessionCode').value = s.sessionId || '';
-  } catch(e) {}
-}
-
-// Init default body part
-window.addEventListener('DOMContentLoaded', () => {
-  selectPart('torse');
+document.addEventListener('DOMContentLoaded',()=>{
+  selPart2('torse');
 });
 
 </script>
-
 <style>
-:root {
-  --bg:     #08080b;
-  --bg2:    #0f0f14;
-  --bg3:    #16161e;
-  --panel:  #111118;
-  --border: #252530;
-  --brd2:   #353545;
-  --gold:   #c5973a;
-  --gold2:  #e8b84b;
-  --goldD:  #7a5c1a;
-  --red:    #cc3333;
-  --redD:   #661a1a;
-  --green:  #2a8a4a;
-  --greenB: #3dba63;
-  --blue:   #2255aa;
-  --blueB:  #4488ee;
-  --purple: #9966dd;
-  --text:   #e8e4d8;
-  --mid:    #b8b4a8;
-  --dim:    #5a5855;
-  --scan:   rgba(197,151,58,.04);
+:root{
+  --bg:#08080b;--bg2:#0f0f14;--bg3:#16161e;--panel:#111118;
+  --border:#252530;--brd2:#353545;
+  --gold:#c5973a;--gold2:#e8b84b;--goldD:#7a5c1a;
+  --red:#cc3333;--green:#2a8a4a;--greenB:#3dba63;
+  --blue:#2255aa;--blueB:#4488ee;--purple:#9966dd;
+  --text:#e8e4d8;--mid:#b8b4a8;--dim:#555250;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:'Share Tech Mono',monospace;min-height:100vh;overflow-x:hidden}
-body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.07) 2px,rgba(0,0,0,.07) 4px);pointer-events:none;z-index:9998}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:'Share Tech Mono',monospace;overflow-x:hidden}
+body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.06) 2px,rgba(0,0,0,.06) 4px);pointer-events:none;z-index:9990}
 
-/* ── SCREENS ── */
-.screen{display:none}
-.screen.active{display:flex;flex-direction:column;min-height:100vh}
+.screen{display:none;flex-direction:column;min-height:100vh}
+.screen.active{display:flex}
 
-/* ── LANDING ── */
-#screen-landing{align-items:center;justify-content:center;padding:40px 20px}
-.landing-box{background:var(--panel);border:1px solid var(--gold);border-radius:8px;padding:40px;max-width:480px;width:100%;box-shadow:0 0 60px rgba(197,151,58,.12)}
-.logo{font-family:'Cinzel',serif;font-size:42px;font-weight:900;color:var(--gold);text-align:center;text-shadow:0 0 30px rgba(197,151,58,.5);letter-spacing:6px;margin-bottom:4px}
-.logo-sub{font-size:10px;color:var(--dim);letter-spacing:4px;text-align:center;margin-bottom:32px}
-.field{margin-bottom:16px}
-.field label{display:block;font-size:10px;letter-spacing:2px;color:var(--dim);margin-bottom:5px;text-transform:uppercase}
-.field input,.field select{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'Share Tech Mono',monospace;font-size:14px;padding:10px 14px;border-radius:3px;outline:none;transition:border-color .2s}
-.field input:focus,.field select:focus{border-color:var(--gold)}
-.btn-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
-.btn{padding:10px 20px;font-family:'Cinzel',serif;font-size:11px;letter-spacing:2px;cursor:pointer;border:1px solid;border-radius:2px;transition:all .2s;text-transform:uppercase;text-align:center}
-.btn-gold{background:transparent;border-color:var(--gold);color:var(--gold)}
+/* LANDING */
+#screen-landing{align-items:center;justify-content:center;padding:40px 20px;background:radial-gradient(ellipse at center,#1a1208 0%,#08080b 70%)}
+.lbox{background:var(--panel);border:1px solid var(--gold);border-radius:8px;padding:44px;max-width:460px;width:100%;box-shadow:0 0 80px rgba(197,151,58,.15)}
+.logo{font-family:'Cinzel',serif;font-size:46px;font-weight:900;color:var(--gold);text-align:center;letter-spacing:8px;text-shadow:0 0 40px rgba(197,151,58,.6);margin-bottom:4px}
+.logosub{font-size:9px;color:var(--dim);letter-spacing:5px;text-align:center;margin-bottom:32px}
+.lsep{height:1px;background:linear-gradient(90deg,transparent,var(--goldD),transparent);margin:20px 0}
+.f{margin-bottom:14px}
+.f label{display:block;font-size:9px;letter-spacing:2px;color:var(--dim);margin-bottom:5px;text-transform:uppercase}
+.f input,.f select{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'Share Tech Mono',monospace;font-size:14px;padding:10px 14px;border-radius:3px;outline:none;transition:border-color .2s}
+.f input:focus{border-color:var(--gold)}
+.brow{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px}
+.btn{padding:11px 20px;font-family:'Cinzel',serif;font-size:11px;letter-spacing:2px;cursor:pointer;border:1px solid;border-radius:2px;transition:all .2s;text-transform:uppercase;background:transparent;text-align:center}
+.btn-gold{border-color:var(--gold);color:var(--gold)}
 .btn-gold:hover{background:var(--gold);color:var(--bg);box-shadow:0 0 20px rgba(197,151,58,.4)}
-.btn-red{background:rgba(204,51,51,.15);border-color:var(--red);color:#ff7777}
-.btn-red:hover{background:rgba(204,51,51,.3)}
-.btn-green{background:var(--green);border-color:var(--greenB);color:#fff}
-.btn-green:hover{background:var(--greenB);box-shadow:0 0 20px rgba(61,186,99,.4)}
-.btn-sm{padding:6px 14px;font-size:10px}
-.btn-block{width:100%;margin-top:8px}
-.btn-icon{background:none;border:none;color:var(--dim);cursor:pointer;font-size:15px;padding:2px 6px;line-height:1}
+.btn-red{border-color:var(--red);color:#ff7777;background:rgba(204,51,51,.08)}
+.btn-red:hover{background:rgba(204,51,51,.25)}
+.btn-green{border-color:var(--greenB);color:#fff;background:var(--green)}
+.btn-green:hover{background:var(--greenB)}
+.btn-gray{border-color:var(--border);color:var(--dim)}
+.btn-gray:hover{border-color:var(--brd2);color:var(--mid)}
+.btn-sm{padding:6px 14px;font-size:9px}
+.btn-blk{width:100%;margin-top:8px}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-icon{background:none;border:none;color:var(--dim);cursor:pointer;font-size:13px;padding:2px 6px}
 .btn-icon:hover{color:var(--red)}
-.setup-note{font-size:11px;color:var(--dim);margin-top:16px;line-height:1.6;border-top:1px solid var(--border);padding-top:12px}
-.setup-note a{color:var(--gold);text-decoration:none}
+.lnote{font-size:10px;color:var(--dim);margin-top:18px;line-height:1.7;border-top:1px solid var(--border);padding-top:14px}
+.lnote a{color:var(--gold);text-decoration:none}
 
-/* ── HEADER ── */
-.app-header{background:var(--bg2);border-bottom:2px solid var(--gold);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;box-shadow:0 4px 30px rgba(197,151,58,.15);position:sticky;top:0;z-index:100}
-.hdr-title{font-family:'Cinzel',serif;font-size:18px;font-weight:900;color:var(--gold);letter-spacing:4px;text-shadow:0 0 15px rgba(197,151,58,.4)}
-.hdr-sub{font-size:9px;color:var(--dim);letter-spacing:3px;margin-top:2px}
-.turn-badge{font-family:'Cinzel',serif;font-size:22px;font-weight:900;color:var(--gold2);text-shadow:0 0 20px rgba(232,184,75,.5)}
-.hdr-meta{font-size:10px;color:var(--dim);letter-spacing:2px}
+/* HEADER */
+.hdr{background:var(--bg2);border-bottom:2px solid var(--gold);padding:11px 24px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;box-shadow:0 4px 30px rgba(197,151,58,.12);position:sticky;top:0;z-index:200}
+.hdrtitle{font-family:'Cinzel',serif;font-size:17px;font-weight:900;color:var(--gold);letter-spacing:4px}
+.hdrsub{font-size:9px;color:var(--dim);letter-spacing:2px;margin-top:2px}
+.hdrturn{font-family:'Cinzel',serif;font-size:26px;font-weight:900;color:var(--gold2);text-shadow:0 0 20px rgba(232,184,75,.5)}
+.hdr-phase{font-size:9px;letter-spacing:2px;text-align:center;margin-top:2px}
+.phase-lobby{color:var(--blueB)}.phase-combat{color:var(--greenB)}.phase-ended{color:var(--dim)}
+.hdracts{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
 
-/* ── TABS ── */
-.tab-bar{display:flex;border-bottom:1px solid var(--border);background:var(--bg2);flex-shrink:0;padding:0 24px}
-.tab-btn{padding:11px 20px;font-family:'Cinzel',serif;font-size:10px;letter-spacing:2px;color:var(--dim);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .2s;background:none;border-top:none;border-left:none;border-right:none}
-.tab-btn:hover{color:var(--mid)}
-.tab-btn.active{color:var(--gold);border-bottom-color:var(--gold)}
+/* TABS */
+.tabbar{display:flex;border-bottom:1px solid var(--border);background:var(--bg2);flex-shrink:0;padding:0 24px;overflow-x:auto}
+.tbtn{padding:10px 18px;font-family:'Cinzel',serif;font-size:10px;letter-spacing:2px;color:var(--dim);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .2s;background:none;border-top:none;border-left:none;border-right:none;white-space:nowrap}
+.tbtn:hover{color:var(--mid)}.tbtn.active{color:var(--gold);border-bottom-color:var(--gold)}
+.dpnl,.ppnl{display:none}.dpnl.active,.ppnl.active{display:block}
 
-/* ── MAIN BODY ── */
-.app-body{flex:1;padding:20px 24px;overflow-y:auto;max-width:1400px;width:100%;margin:0 auto}
-.dm-panel,.pl-panel{display:none}
-.dm-panel.active,.pl-panel.active{display:block}
+/* BODY */
+.abody{flex:1;padding:18px 24px 130px;overflow-y:auto}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:16px;position:relative;margin-bottom:14px}
+.card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--gold),transparent);opacity:.25}
+.ctitle{font-family:'Cinzel',serif;font-size:10px;letter-spacing:3px;color:var(--gold);margin-bottom:12px;padding-bottom:7px;border-bottom:1px solid var(--border)}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.cgrid{display:grid;grid-template-columns:230px 1fr 230px;gap:12px}
 
-/* ── LAYOUT GRIDS ── */
-.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
-.combat-grid{display:grid;grid-template-columns:260px 1fr 260px;gap:14px}
-@media(max-width:1050px){.combat-grid{grid-template-columns:220px 1fr}}
-@media(max-width:700px){.combat-grid{grid-template-columns:1fr}.grid-2{grid-template-columns:1fr}}
+/* SETUP */
+.sform{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px}
+.sform .f{margin-bottom:0;flex:1;min-width:70px}
+.sform .f input,.sform .f select{padding:7px 10px;font-size:12px}
+.presets{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px}
+.pbtn2{background:none;border:1px solid var(--border);color:var(--dim);font-family:'Cinzel',serif;font-size:9px;letter-spacing:1px;padding:4px 10px;border-radius:2px;cursor:pointer;transition:all .2s}
+.pbtn2:hover{border-color:var(--gold);color:var(--gold)}
+.setup-row{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;margin-bottom:6px}
+.sname{flex:1;font-family:'Cinzel',serif;font-size:12px}
+.sstat{font-size:10px;color:var(--dim);min-width:48px}
+.rdy-yes{color:var(--greenB)}.rdy-no{color:var(--gold)}
 
-/* ── CARDS ── */
-.card{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:18px;position:relative;margin-bottom:14px}
-.card::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--gold),transparent);opacity:.3}
-.card-title{font-family:'Cinzel',serif;font-size:11px;letter-spacing:3px;color:var(--gold);margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
-.card-title.red{color:var(--red)}
+/* COMBAT CARDS */
+.ccard{background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:11px;cursor:pointer;transition:all .2s;margin-bottom:7px}
+.ccard:hover:not(.is-dead){border-color:var(--brd2)}
+.ccard.is-atk{border-color:var(--blueB);box-shadow:0 0 10px rgba(68,136,238,.2)}
+.ccard.is-tgt{border-color:var(--red);box-shadow:0 0 10px rgba(204,51,51,.2)}
+.ccard.is-dead{opacity:.4;cursor:default;pointer-events:none}
+.ctop{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
+.cname{font-family:'Cinzel',serif;font-size:13px;margin-left:5px}
+.catag{font-size:10px;color:var(--dim);background:var(--bg2);border:1px solid var(--border);padding:1px 7px;border-radius:2px}
+.tbdg{font-size:8px;padding:1px 5px;border-radius:2px;letter-spacing:1px}
+.tbdg.ally{background:rgba(34,85,170,.3);color:var(--blueB);border:1px solid var(--blue)}
+.tbdg.enemy{background:rgba(204,51,51,.3);color:#ff7777;border:1px solid #661a1a}
+.hptr{background:var(--bg);border:1px solid var(--border);height:5px;border-radius:1px;overflow:hidden;margin:4px 0 3px}
+.hpfl{height:100%;transition:width .5s,background .3s;border-radius:1px}
+.hprow{font-size:10px;color:var(--dim)}
+.tagrow{display:flex;flex-wrap:wrap;gap:3px;margin-top:4px}
+.stag{font-size:8px;padding:1px 5px;border-radius:10px;background:rgba(153,102,221,.2);color:var(--purple);border:1px solid rgba(153,102,221,.35)}
+.rlbl{font-size:8px;letter-spacing:1px;margin-top:4px}
+.atklbl{color:var(--blueB)}.tgtlbl{color:#ff7777}
 
-/* ── COMBATANT CARDS ── */
-.comb-card{background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:12px;cursor:pointer;transition:all .2s;margin-bottom:8px}
-.comb-card:hover:not(.is-dead){border-color:var(--brd2)}
-.comb-card.is-atk{border-color:var(--blueB);box-shadow:0 0 12px rgba(68,136,238,.2)}
-.comb-card.is-tgt{border-color:var(--red);box-shadow:0 0 12px rgba(204,51,51,.25)}
-.comb-card.is-dead{opacity:.4;cursor:default}
-.comb-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
-.cname{font-family:'Cinzel',serif;font-size:13px;color:var(--text);margin-left:6px}
-.ca-badge{font-size:11px;color:var(--dim);background:var(--bg2);border:1px solid var(--border);padding:2px 8px;border-radius:2px}
-.hp-track{background:var(--bg);border:1px solid var(--border);height:6px;border-radius:1px;overflow:hidden;margin:5px 0 3px}
-.hp-fill{height:100%;transition:width .5s,background .3s;border-radius:1px}
-.hp-text{display:flex;justify-content:space-between;font-size:10px;color:var(--dim)}
-.tag-row{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
-.status-tag{font-size:9px;padding:1px 6px;border-radius:10px;background:rgba(153,102,221,.25);color:var(--purple);border:1px solid rgba(153,102,221,.4)}
-.role-label{font-size:9px;letter-spacing:1px;margin-top:5px}
-.atk-label{color:var(--blueB)}
-.tgt-label{color:#ff7777}
-.type-badge{font-size:9px;padding:1px 6px;border-radius:2px;letter-spacing:1px}
-.type-badge.ally{background:rgba(34,85,170,.3);color:var(--blueB);border:1px solid var(--blue)}
-.type-badge.enemy{background:rgba(204,51,51,.3);color:#ff7777;border:1px solid var(--red)}
-.setup-card{background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:12px;margin-bottom:8px}
-.mini-stats{font-size:10px;color:var(--dim);margin:4px 0}
+/* INITIATIVE */
+.irow{display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;margin-bottom:5px}
+.irow.idead{opacity:.4}
+.inum{font-family:'Cinzel',serif;font-size:15px;color:var(--gold);width:20px}
+.iname{flex:1;font-size:12px}
+.ival{font-size:11px;padding:1px 7px;border-radius:2px}
+.ival.ally{color:var(--blueB)}.ival.enemy{color:#ff7777}
 
-/* ── INITIATIVE ── */
-.init-row{display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;margin-bottom:5px}
-.init-row.dead{opacity:.4}
-.init-num{font-family:'Cinzel',serif;font-size:16px;color:var(--gold);width:22px;flex-shrink:0}
-.init-name{flex:1;font-size:13px}
-.init-val{font-size:12px;padding:2px 8px;border-radius:2px}
-.init-val.ally{color:var(--blueB)}
-.init-val.enemy{color:#ff7777}
-
-/* ── ATTACK PANEL ── */
-.sel-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
-.sel-box{border:1px solid var(--border);border-radius:3px;padding:10px}
-.sel-box.atk-box{border-color:rgba(68,136,238,.4);background:rgba(34,85,170,.07)}
-.sel-box.tgt-box{border-color:rgba(204,51,51,.4);background:rgba(204,51,51,.07)}
-.sel-label{font-size:9px;letter-spacing:2px;color:var(--dim);margin-bottom:4px}
-.sel-val{font-family:'Cinzel',serif;font-size:14px}
-
-/* ── BODY DIAGRAM ── */
-.vats-layout{display:flex;gap:14px}
-.body-wrap{flex-shrink:0;width:100px}
-.body-svg{width:100%}
-.svg-part{cursor:pointer;transition:all .2s;fill:rgba(197,151,58,.08);stroke:var(--goldD);stroke-width:1.5}
-.svg-part:hover{fill:rgba(197,151,58,.22);stroke:var(--gold)}
-.svg-part.svg-sel{fill:rgba(197,151,58,.38);stroke:var(--gold2);stroke-width:2;filter:drop-shadow(0 0 5px rgba(197,151,58,.5))}
-.svg-part.crit-part{fill:rgba(204,51,51,.15);stroke:rgba(204,51,51,.5)}
-.svg-part.crit-part:hover{fill:rgba(204,51,51,.3)}
-.svg-part.crit-part.svg-sel{fill:rgba(204,51,51,.42);stroke:#ff4444;filter:drop-shadow(0 0 5px rgba(204,51,51,.5))}
-.parts-list{flex:1;display:flex;flex-direction:column;gap:5px;max-height:260px;overflow-y:auto}
-.part-btn{background:var(--bg3);border:1px solid var(--border);border-radius:2px;padding:7px 10px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;width:100%;transition:all .2s;text-align:left}
-.part-btn:hover{border-color:var(--brd2)}
-.part-btn.sel{border-color:var(--gold);background:rgba(197,151,58,.08)}
-.part-btn.sel-crit{border-color:var(--red);background:rgba(204,51,51,.08)}
-.pname{font-family:'Cinzel',serif;font-size:11px;color:var(--text)}
-.ptags{display:flex;gap:3px}
-.ptag{font-size:9px;padding:1px 5px;border-radius:2px;letter-spacing:.5px}
-.ptag-dc{background:rgba(153,102,221,.25);color:var(--purple);border:1px solid rgba(153,102,221,.4)}
-.ptag-dm{background:rgba(204,51,51,.25);color:#ff7777;border:1px solid var(--redD)}
-.ptag-fx{background:rgba(42,138,74,.25);color:var(--greenB);border:1px solid var(--green)}
-
-/* ── DICE INPUTS ── */
-.dice-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
-.dice-field label{display:block;font-size:9px;letter-spacing:2px;color:var(--dim);margin-bottom:4px;text-transform:uppercase}
-.dice-field input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'Share Tech Mono',monospace;font-size:24px;text-align:center;padding:10px;border-radius:3px;outline:none;transition:border-color .2s}
-.dice-field input:focus{border-color:var(--gold)}
+/* ATTACK PANEL */
+.selrow{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+.selbox{border:1px solid var(--border);border-radius:3px;padding:9px}
+.selbox.ab{border-color:rgba(68,136,238,.4);background:rgba(34,85,170,.06)}
+.selbox.tb{border-color:rgba(204,51,51,.4);background:rgba(204,51,51,.06)}
+.sellbl{font-size:8px;letter-spacing:2px;color:var(--dim);margin-bottom:3px}
+.selval{font-family:'Cinzel',serif;font-size:13px}
+.vatswrap{display:flex;gap:12px;margin-bottom:12px}
+.bodycol{flex-shrink:0;width:88px}
+.bsvg{width:100%}
+.svgp{cursor:pointer;transition:all .2s;fill:rgba(197,151,58,.08);stroke:var(--goldD);stroke-width:1.5}
+.svgp:hover{fill:rgba(197,151,58,.22);stroke:var(--gold)}
+.svgp.svgsel{fill:rgba(197,151,58,.38);stroke:var(--gold2);stroke-width:2;filter:drop-shadow(0 0 5px rgba(197,151,58,.5))}
+.svgp.critp{fill:rgba(204,51,51,.12);stroke:rgba(204,51,51,.45)}
+.svgp.critp:hover{fill:rgba(204,51,51,.28)}
+.svgp.critp.svgsel{fill:rgba(204,51,51,.42);stroke:#ff4444;filter:drop-shadow(0 0 5px rgba(204,51,51,.5))}
+.partscol{flex:1;display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:230px}
+.pbtn{background:var(--bg3);border:1px solid var(--border);border-radius:2px;padding:6px 9px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;width:100%;transition:all .2s;text-align:left}
+.pbtn:hover{border-color:var(--brd2)}
+.pbtn.sel{border-color:var(--gold);background:rgba(197,151,58,.07)}
+.pbtn.selc{border-color:var(--red);background:rgba(204,51,51,.07)}
+.pname{font-family:'Cinzel',serif;font-size:10px;color:var(--text)}
+.ptags2{display:flex;gap:3px}
+.pt{font-size:8px;padding:1px 4px;border-radius:2px}
+.ptdc{background:rgba(153,102,221,.2);color:var(--purple);border:1px solid rgba(153,102,221,.35)}
+.ptdm{background:rgba(204,51,51,.2);color:#ff7777;border:1px solid #661a1a}
+.ptfx{background:rgba(42,138,74,.2);color:var(--greenB);border:1px solid var(--green)}
+.dicerow{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.df label{display:block;font-size:8px;letter-spacing:2px;color:var(--dim);margin-bottom:4px}
+.df input{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'Share Tech Mono',monospace;font-size:26px;text-align:center;padding:9px;border-radius:3px;outline:none;transition:border-color .2s}
+.df input:focus{border-color:var(--gold)}
 input[type=number]{-moz-appearance:textfield}
 input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
+.rbox{background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:12px;margin-bottom:10px;font-family:'Crimson Pro',serif;font-size:15px;color:var(--mid);line-height:1.65;min-height:65px}
 
-/* ── RESULT BOX ── */
-.result-box{background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:14px;margin-bottom:12px;font-family:'Crimson Pro',serif;font-size:15px;color:var(--mid);line-height:1.65;min-height:70px}
+/* LOG */
+.llist{display:flex;flex-direction:column;gap:4px;max-height:300px;overflow-y:auto}
+.lturn{font-family:'Cinzel',serif;font-size:9px;letter-spacing:3px;color:var(--gold);padding:7px 0 3px;border-top:1px solid var(--border);margin-top:4px}
+.lturn:first-child{border-top:none;margin-top:0;padding-top:0}
+.lentry{background:var(--bg3);border-left:3px solid var(--border);border-radius:2px;padding:6px 9px;font-size:11px;line-height:1.5}
+.lhit{border-left-color:#3dba63}.lmiss{border-left-color:#555}.lcrit{border-left-color:#e8b84b}.lkill{border-left-color:var(--red)}.lfumble{border-left-color:var(--red)}
+.empty{text-align:center;color:var(--dim);font-size:10px;padding:24px;letter-spacing:2px}
+.dim{color:var(--dim)}
 
-/* ── LOG ── */
-.log-list{display:flex;flex-direction:column;gap:5px;max-height:340px;overflow-y:auto}
-.log-turn-hdr{font-family:'Cinzel',serif;font-size:10px;letter-spacing:3px;color:var(--gold);padding:8px 0 4px;border-top:1px solid var(--border);margin-top:4px}
-.log-turn-hdr:first-child{border-top:none;margin-top:0;padding-top:0}
-.log-entry{background:var(--bg3);border-left:3px solid var(--border);border-radius:2px;padding:7px 10px;font-size:12px;line-height:1.5}
-.log-entry.log-hit{border-left-color:var(--greenB)}
-.log-entry.log-miss{border-left-color:var(--dim)}
-.log-entry.log-crit{border-left-color:var(--gold2)}
-.log-entry.log-kill{border-left-color:var(--red)}
-.log-entry.log-fumble{border-left-color:var(--red)}
-.empty{text-align:center;color:var(--dim);font-size:11px;padding:30px;letter-spacing:2px}
+/* CHAT FLOAT */
+#chat-float{position:fixed;bottom:0;left:16px;width:290px;z-index:500;background:var(--panel);border:1px solid var(--border);border-bottom:none;border-radius:6px 6px 0 0;box-shadow:0 -4px 30px rgba(0,0,0,.4);display:flex;flex-direction:column}
+#chat-hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-bottom:1px solid var(--border);cursor:pointer;background:var(--bg2);border-radius:6px 6px 0 0}
+#chat-htitle{font-family:'Cinzel',serif;font-size:10px;letter-spacing:2px;color:var(--gold);display:flex;align-items:center;gap:8px}
+#chat-badge{display:none;background:var(--red);color:#fff;font-size:9px;padding:1px 6px;border-radius:10px;min-width:18px;text-align:center}
+#chat-tog{font-size:11px;color:var(--dim);background:none;border:none;cursor:pointer}
+#chat-body{display:flex;flex-direction:column;height:230px}
+#chat-dm,#chat-p{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:5px}
+.cmsg{display:flex;flex-direction:column;gap:1px}
+.cfrom{font-size:8px;letter-spacing:1px;color:var(--dim)}
+.cdm{color:var(--gold)}.cme .cfrom{color:var(--blueB)}
+.ctxt{font-family:'Crimson Pro',serif;font-size:13px;color:var(--mid);line-height:1.4}
+.cme .ctxt{color:var(--text)}
+.cinprow{display:flex;gap:6px;padding:8px 10px;border-top:1px solid var(--border)}
+.cinprow input{flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'Crimson Pro',serif;font-size:13px;padding:6px 10px;border-radius:3px;outline:none}
+.cinprow input:focus{border-color:var(--gold)}
+.cinprow button{padding:6px 12px;font-family:'Cinzel',serif;font-size:9px;cursor:pointer;border:1px solid var(--gold);color:var(--gold);background:transparent;border-radius:2px}
+.cinprow button:hover{background:var(--gold);color:var(--bg)}
 
-/* ── CHAT ── */
-.chat-msgs{display:flex;flex-direction:column;gap:6px;max-height:280px;overflow-y:auto;padding:4px 0;margin-bottom:10px}
-.chat-msg{display:flex;flex-direction:column;gap:2px}
-.chat-from{font-size:9px;letter-spacing:1px;color:var(--dim)}
-.dm-tag{color:var(--gold)}
-.chat-text{font-family:'Crimson Pro',serif;font-size:14px;color:var(--mid);line-height:1.4}
-.chat-msg.me .chat-text{color:var(--text)}
-.chat-input-row{display:flex;gap:8px}
-.chat-input-row input{flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:'Crimson Pro',serif;font-size:14px;padding:8px 12px;border-radius:3px;outline:none}
-.chat-input-row input:focus{border-color:var(--gold)}
+/* PLAYER LOBBY */
+.lobbyhero{text-align:center;padding:28px 0 18px}
+.lobbytitle{font-family:'Cinzel',serif;font-size:22px;color:var(--gold);letter-spacing:4px;margin-bottom:6px}
+.lobbysub{font-size:11px;color:var(--dim);letter-spacing:2px}
+.charform{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.charform .f{margin-bottom:0}
+.charform .f input{padding:9px 12px;font-size:13px}
+#saved-badge{display:none;margin-top:10px;text-align:center;font-size:10px;color:var(--greenB);letter-spacing:2px}
 
-/* ── SETUP FORM ── */
-.setup-form{display:grid;grid-template-columns:1fr 1fr 80px 80px 70px;gap:8px;align-items:end;margin-bottom:10px}
-.setup-form .field{margin-bottom:0}
-.setup-form input,.setup-form select{padding:8px 10px;font-size:12px}
-.presets{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
-.preset-btn{background:none;border:1px solid var(--border);color:var(--dim);font-family:'Cinzel',serif;font-size:9px;letter-spacing:1px;padding:5px 12px;border-radius:2px;cursor:pointer;transition:all .2s}
-.preset-btn:hover{border-color:var(--gold);color:var(--gold)}
+/* POPUP */
+#combat-popup{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:800;align-items:center;justify-content:center}
+#combat-popup.show{display:flex}
+.popbox{background:var(--panel);border:2px solid var(--gold);border-radius:8px;padding:40px;text-align:center;max-width:360px;box-shadow:0 0 60px rgba(197,151,58,.2)}
+.poptitle{font-family:'Cinzel',serif;font-size:20px;color:var(--gold);letter-spacing:4px;margin-bottom:12px}
+.popsub{font-size:12px;color:var(--mid);margin-bottom:22px;line-height:1.6}
+.popbtns{display:flex;gap:10px;justify-content:center}
 
-/* ── TOAST ── */
-#toast{position:fixed;bottom:20px;right:20px;background:var(--panel);border:1px solid var(--gold);border-radius:4px;padding:10px 18px;font-size:12px;color:var(--gold);z-index:9999;transform:translateY(80px);opacity:0;transition:all .3s;box-shadow:0 4px 20px rgba(197,151,58,.2)}
+/* TOAST */
+#toast{position:fixed;bottom:20px;right:20px;background:var(--panel);border:1px solid var(--gold);border-radius:4px;padding:10px 18px;font-size:11px;color:var(--gold);z-index:9999;transform:translateY(80px);opacity:0;transition:all .3s;box-shadow:0 4px 20px rgba(197,151,58,.2)}
 #toast.show{transform:translateY(0);opacity:1}
 
-/* ── SCROLLBAR ── */
 ::-webkit-scrollbar{width:3px}::-webkit-scrollbar-track{background:var(--bg)}::-webkit-scrollbar-thumb{background:var(--brd2);border-radius:2px}
+
+@media(max-width:1000px){.cgrid{grid-template-columns:200px 1fr}}
+@media(max-width:700px){.cgrid{grid-template-columns:1fr}.g2{grid-template-columns:1fr}.abody{padding:14px 14px 130px}#chat-float{width:calc(100vw - 32px)}}
 </style>
 </head>
 <body>
 
-<!-- ═══════════════ LANDING ═══════════════ -->
+<!-- LANDING -->
 <div id="screen-landing" class="screen active">
-  <div class="landing-box">
+  <div class="lbox">
     <div class="logo">AETHON</div>
-    <div class="logo-sub">SYSTÈME DE COMBAT MULTIJOUEUR</div>
-
-    <div class="field">
-      <label>Ton nom</label>
-      <input id="playerName" type="text" placeholder="Ex: Ser Brenn, Wren, le DM..." />
+    <div class="logosub">SYSTEME DE COMBAT D&D MULTIJOUEUR</div>
+    <div class="lsep"></div>
+    <div class="f"><label>Ton nom</label><input id="inp-name" placeholder="Ex: Wren, Ser Brenn, Le DM..."/></div>
+    <div class="f"><label>Code de session (invente par le DM)</label>
+      <input id="inp-sid" placeholder="Ex: ASHENVEIL01" style="text-transform:uppercase" oninput="this.value=this.value.toUpperCase()"/></div>
+    <div class="brow">
+      <button class="btn btn-gold" onclick="joinSession('dm')">GAME MASTER</button>
+      <button class="btn btn-red"  onclick="joinSession('player')">JOUEUR</button>
     </div>
-    <div class="field">
-      <label>Code de session (inventé par le DM)</label>
-      <input id="sessionCode" type="text" placeholder="Ex: ASHENVEIL01" style="text-transform:uppercase" />
-    </div>
-    <div class="btn-row">
-      <button class="btn btn-gold" onclick="joinAsRole('dm')">⚔ GAME MASTER</button>
-      <button class="btn btn-red" onclick="joinAsRole('player')">◈ JOUEUR</button>
-    </div>
-
-    <div class="setup-note">
-      <strong style="color:var(--gold)">Configuration Firebase requise</strong><br><br>
-      1. Va sur <a href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a><br>
-      2. Crée un projet → <strong>Realtime Database</strong> → "Start in test mode"<br>
-      3. Clique l'icône &lt;/&gt; (Web) → copie les valeurs <code>firebaseConfig</code><br>
-      4. Remplace les valeurs <code>VOTRE_...</code> dans le code HTML (lignes ~45)<br><br>
-      <strong>Le DM crée la session</strong> avec un code, les joueurs rejoignent avec le même code.
+    <div class="lnote">
+      Config Firebase deja integree dans le code.<br>
+      Le <strong>DM cree la session</strong> avec un code — les joueurs rejoignent avec le meme code.
     </div>
   </div>
 </div>
 
-<!-- ═══════════════ DM SCREEN ═══════════════ -->
+<!-- DM SCREEN -->
 <div id="screen-dm" class="screen">
-  <div class="app-header">
+  <div class="hdr">
     <div>
-      <div class="hdr-title">⚔ AETHON DM</div>
-      <div class="hdr-sub" id="dmSessionLabel">SESSION —</div>
+      <div class="hdrtitle">AETHON — GAME MASTER</div>
+      <div class="hdrsub session-id">SESSION —</div>
     </div>
-    <div class="turn-badge turn-num">1</div>
-    <div style="display:flex;gap:8px;align-items:center">
-      <button class="btn btn-sm btn-gold" onclick="endTurn()">TOUR SUIVANT ▶</button>
-      <button class="btn btn-sm btn-red" onclick="resetCombat()">↺ RESET</button>
+    <div style="text-align:center">
+      <div class="hdrturn turn-num">1</div>
+      <div id="dm-phase" class="hdr-phase phase-lobby">LOBBY</div>
+    </div>
+    <div class="hdracts">
+      <button class="btn btn-sm btn-gold"  onclick="nextTurn()">TOUR+ ▶</button>
+      <button class="btn btn-sm btn-green" onclick="startCombat()">LANCER</button>
+      <button class="btn btn-sm btn-gray"  onclick="endCombat()">TERMINER</button>
+      <button class="btn btn-sm btn-red"   onclick="quitCombat()">QUITTER</button>
     </div>
   </div>
-
-  <div class="tab-bar">
-    <button class="tab-btn dm-tab active" id="dmt-setup"  onclick="showDMTab('setup')">SETUP</button>
-    <button class="tab-btn dm-tab"        id="dmt-combat" onclick="showDMTab('combat')">COMBAT</button>
-    <button class="tab-btn dm-tab"        id="dmt-log"    onclick="showDMTab('log')">JOURNAL</button>
-    <button class="tab-btn dm-tab"        id="dmt-chat"   onclick="showDMTab('chat')">CHAT</button>
+  <div class="tabbar">
+    <button class="tbtn dtab active" id="dt-setup"  onclick="showDMTab('setup')">SETUP</button>
+    <button class="tbtn dtab"        id="dt-combat" onclick="showDMTab('combat')">COMBAT</button>
+    <button class="tbtn dtab"        id="dt-log"    onclick="showDMTab('log')">JOURNAL</button>
+    <button class="tbtn dtab"        id="dt-init"   onclick="showDMTab('init')">INITIATIVE</button>
   </div>
+  <div class="abody">
 
-  <div class="app-body">
-
-    <!-- SETUP TAB -->
-    <div class="dm-panel active" id="dmp-setup">
-      <div class="card">
-        <div class="card-title">AJOUTER UN COMBATTANT</div>
-        <div class="presets">
-          <button class="preset-btn" onclick="loadPresetDM('soldier')">Soldat Maren</button>
-          <button class="preset-btn" onclick="loadPresetDM('hunter')">Chasseur Concordia</button>
-          <button class="preset-btn" onclick="loadPresetDM('whisper')">Susurro</button>
-          <button class="preset-btn" onclick="loadPresetDM('wren')">Wren Aldis</button>
-        </div>
-        <div class="setup-form">
-          <div class="field"><label>Nom</label><input id="cName" placeholder="Nom..." /></div>
-          <div class="field"><label>Type</label>
-            <select id="cType"><option value="enemy">Ennemi</option><option value="ally">Allié</option></select>
-          </div>
-          <div class="field"><label>CA</label><input id="cCA" type="number" value="12" /></div>
-          <div class="field"><label>PV Max</label><input id="cPV" type="number" value="20" /></div>
-          <div class="field"><label>Init</label><input id="cInit" type="number" value="0" /></div>
-        </div>
-        <button class="btn btn-gold btn-sm" onclick="addCombatant()">+ AJOUTER</button>
-      </div>
-      <div class="card">
-        <div class="card-title">COMBATTANTS DANS LA SESSION</div>
-        <div id="dmCombatantList"><div class="empty">Aucun combattant</div></div>
-        <button class="btn btn-green btn-block" onclick="startCombat()" style="margin-top:12px">▶ LANCER LE COMBAT</button>
-      </div>
-    </div>
-
-    <!-- COMBAT TAB -->
-    <div class="dm-panel" id="dmp-combat">
-      <div class="combat-grid">
-
-        <!-- Left: combatants + initiative -->
+    <!-- SETUP -->
+    <div class="dpnl active" id="dp-setup">
+      <div class="g2">
         <div>
           <div class="card">
-            <div class="card-title">COMBATTANTS</div>
-            <div style="font-size:9px;color:var(--dim);margin-bottom:8px">BLEU=attaquant · ROUGE=cible</div>
-            <div id="combatListDM"></div>
+            <div class="ctitle">ENNEMIS</div>
+            <div class="presets">
+              <button class="pbtn2" onclick="loadPreset('soldier')">Soldat Maren</button>
+              <button class="pbtn2" onclick="loadPreset('hunter')">Chasseur</button>
+              <button class="pbtn2" onclick="loadPreset('whisper')">Susurro</button>
+              <button class="pbtn2" onclick="loadPreset('guard')">Garde royal</button>
+              <button class="pbtn2" onclick="loadPreset('bandit')">Bandit</button>
+              <button class="pbtn2" onclick="loadPreset('troll')">Troll</button>
+            </div>
+            <div class="sform">
+              <div class="f"><label>Nom</label><input id="e-name" placeholder="Nom..."/></div>
+              <div class="f"><label>CA</label><input id="e-ca" type="number" value="12"/></div>
+              <div class="f"><label>PV</label><input id="e-pv" type="number" value="20"/></div>
+              <div class="f"><label>Init</label><input id="e-init" type="number" value="0"/></div>
+              <button class="btn btn-gold btn-sm" onclick="addEnemy()" style="align-self:flex-end;margin-bottom:0">+ ADD</button>
+            </div>
+            <div id="enemy-list"><div class="empty">Aucun ennemi</div></div>
           </div>
+        </div>
+        <div>
           <div class="card">
-            <div class="card-title">INITIATIVE</div>
-            <div id="initListDM"></div>
+            <div class="ctitle">JOUEURS CONNECTES</div>
+            <div id="player-list"><div class="empty">En attente...</div></div>
+          </div>
+          <div class="card" style="background:rgba(42,138,74,.06);border-color:rgba(61,186,99,.3)">
+            <div class="ctitle" style="color:var(--greenB)">DEMARRER LE COMBAT</div>
+            <p style="font-size:11px;color:var(--dim);margin-bottom:14px;line-height:1.7">Les PV seront reinitialises et le journal efface a chaque nouveau combat.</p>
+            <button class="btn btn-green btn-blk" onclick="startCombat()">DEMARRER LE COMBAT</button>
           </div>
         </div>
+      </div>
+    </div>
 
-        <!-- Center: attack panel -->
+    <!-- COMBAT -->
+    <div class="dpnl" id="dp-combat">
+      <div class="cgrid">
+        <div>
+          <div class="card">
+            <div class="ctitle">COMBATTANTS</div>
+            <div style="font-size:8px;color:var(--dim);margin-bottom:7px">BLEU = attaquant · ROUGE = cible</div>
+            <div id="comb-dm"></div>
+          </div>
+        </div>
         <div class="card">
-          <div class="card-title">S.C.A.V. — CIBLAGE</div>
-          <div class="sel-row">
-            <div class="sel-box atk-box">
-              <div class="sel-label">ATTAQUANT</div>
-              <div class="sel-val" id="atkLabel">— Aucun —</div>
+          <div class="ctitle">S.C.A.V. — SYSTEME DE CIBLAGE</div>
+          <div class="selrow">
+            <div class="selbox ab"><div class="sellbl">ATTAQUANT</div><div class="selval" id="atklbl">- Aucun -</div></div>
+            <div class="selbox tb"><div class="sellbl">CIBLE <span id="tgt-ca" style="color:var(--gold);font-size:9px"></span></div><div class="selval" id="tgtlbl">- Aucun -</div></div>
+          </div>
+          <div class="vatswrap">
+            <div class="bodycol">
+              <svg class="bsvg" viewBox="0 0 80 200">
+                <ellipse id="sv-tete"    class="svgp critp" cx="40" cy="18" rx="14" ry="16" onclick="selPart2('tete')"/>
+                <rect    id="sv-cou"     class="svgp critp" x="33" y="33" width="14" height="10" rx="3" onclick="selPart2('cou')"/>
+                <rect    id="sv-torse"   class="svgp"       x="22" y="43" width="36" height="50" rx="4" onclick="selPart2('torse')"/>
+                <rect    id="sv-bras_g"  class="svgp"       x="6"  y="45" width="14" height="45" rx="5" onclick="selPart2('bras_g')"/>
+                <rect    id="sv-bras_d"  class="svgp"       x="60" y="45" width="14" height="45" rx="5" onclick="selPart2('bras_d')"/>
+                <rect    id="sv-bassin"  class="svgp"       x="25" y="93" width="30" height="18" rx="3" onclick="selPart2('bassin')"/>
+                <rect    id="sv-jambe_g" class="svgp"       x="22" y="111" width="16" height="60" rx="5" onclick="selPart2('jambe_g')"/>
+                <rect    id="sv-jambe_d" class="svgp"       x="42" y="111" width="16" height="60" rx="5" onclick="selPart2('jambe_d')"/>
+                <text x="40" y="21" text-anchor="middle" fill="rgba(197,151,58,.55)" font-size="6" font-family="Share Tech Mono">TETE</text>
+                <text x="40" y="70" text-anchor="middle" fill="rgba(197,151,58,.55)" font-size="6" font-family="Share Tech Mono">TORSE</text>
+              </svg>
             </div>
-            <div class="sel-box tgt-box">
-              <div class="sel-label">CIBLE <span id="tgtCAInfo" style="color:var(--gold);font-size:10px"></span></div>
-              <div class="sel-val" id="tgtLabel">— Aucun —</div>
+            <div class="partscol">
+              <div id="pb-tete"    class="pbtn" onclick="selPart2('tete')">   <span class="pname">Tete</span>       <div class="ptags2"><span class="pt ptdc">DC+4</span><span class="pt ptdm">x1.5</span><span class="pt ptfx">ASSOMME</span></div></div>
+              <div id="pb-cou"     class="pbtn" onclick="selPart2('cou')">    <span class="pname">Cou</span>        <div class="ptags2"><span class="pt ptdc">DC+6</span><span class="pt ptdm">x2.0</span><span class="pt ptfx">DECAP.</span></div></div>
+              <div id="pb-torse"   class="pbtn" onclick="selPart2('torse')">  <span class="pname">Torse</span>     <div class="ptags2"><span class="pt ptdc">DC+0</span><span class="pt ptdm">x1.0</span></div></div>
+              <div id="pb-bras_g"  class="pbtn" onclick="selPart2('bras_g')"> <span class="pname">Bras gauche</span><div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-bras_d"  class="pbtn" onclick="selPart2('bras_d')"> <span class="pname">Bras droit</span> <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-bassin"  class="pbtn" onclick="selPart2('bassin')"> <span class="pname">Bassin</span>    <div class="ptags2"><span class="pt ptdc">DC+1</span><span class="pt ptdm">x1.0</span></div></div>
+              <div id="pb-jambe_g" class="pbtn" onclick="selPart2('jambe_g')"><span class="pname">Jambe g.</span>  <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-jambe_d" class="pbtn" onclick="selPart2('jambe_d')"><span class="pname">Jambe d.</span>  <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
             </div>
           </div>
-
-          <!-- Body part -->
-          <div style="margin-bottom:14px">
-            <div style="font-size:9px;letter-spacing:2px;color:var(--dim);margin-bottom:8px">PARTIE DU CORPS</div>
-            <div class="vats-layout">
-              <div class="body-wrap">
-                <svg class="body-svg" viewBox="0 0 80 200">
-                  <ellipse id="sv-tete"    class="svg-part crit-part" cx="40" cy="18" rx="14" ry="16" onclick="selectPart('tete')"/>
-                  <rect    id="sv-cou"     class="svg-part crit-part" x="33" y="33" width="14" height="10" rx="3" onclick="selectPart('cou')"/>
-                  <rect    id="sv-torse"   class="svg-part"           x="22" y="43" width="36" height="50" rx="4" onclick="selectPart('torse')"/>
-                  <rect    id="sv-bras_g"  class="svg-part"           x="6"  y="45" width="14" height="45" rx="5" onclick="selectPart('bras_g')"/>
-                  <rect    id="sv-bras_d"  class="svg-part"           x="60" y="45" width="14" height="45" rx="5" onclick="selectPart('bras_d')"/>
-                  <rect    id="sv-bassin"  class="svg-part"           x="25" y="93" width="30" height="18" rx="3" onclick="selectPart('bassin')"/>
-                  <rect    id="sv-jambe_g" class="svg-part"           x="22" y="111" width="16" height="60" rx="5" onclick="selectPart('jambe_g')"/>
-                  <rect    id="sv-jambe_d" class="svg-part"           x="42" y="111" width="16" height="60" rx="5" onclick="selectPart('jambe_d')"/>
-                  <text x="40" y="21" text-anchor="middle" fill="rgba(197,151,58,.6)" font-size="7" font-family="Share Tech Mono">TÊTE</text>
-                  <text x="40" y="70" text-anchor="middle" fill="rgba(197,151,58,.6)" font-size="7" font-family="Share Tech Mono">TORSE</text>
-                </svg>
-              </div>
-              <div class="parts-list">
-                <div id="pb-tete"    class="part-btn" onclick="selectPart('tete')"><span class="pname">Tête</span><div class="ptags"><span class="ptag ptag-dc">DC+4</span><span class="ptag ptag-dm">×1.5</span><span class="ptag ptag-fx">ASSOMMÉ</span></div></div>
-                <div id="pb-cou"     class="part-btn" onclick="selectPart('cou')"><span class="pname">Cou</span><div class="ptags"><span class="ptag ptag-dc">DC+6</span><span class="ptag ptag-dm">×2.0</span><span class="ptag ptag-fx">DÉCAP.</span></div></div>
-                <div id="pb-torse"   class="part-btn" onclick="selectPart('torse')"><span class="pname">Torse</span><div class="ptags"><span class="ptag ptag-dc">DC+0</span><span class="ptag ptag-dm">×1.0</span></div></div>
-                <div id="pb-bras_g"  class="part-btn" onclick="selectPart('bras_g')"><span class="pname">Bras gauche</span><div class="ptags"><span class="ptag ptag-dc">DC+2</span><span class="ptag ptag-dm">×0.75</span></div></div>
-                <div id="pb-bras_d"  class="part-btn" onclick="selectPart('bras_d')"><span class="pname">Bras droit</span><div class="ptags"><span class="ptag ptag-dc">DC+2</span><span class="ptag ptag-dm">×0.75</span></div></div>
-                <div id="pb-bassin"  class="part-btn" onclick="selectPart('bassin')"><span class="pname">Bassin</span><div class="ptags"><span class="ptag ptag-dc">DC+1</span><span class="ptag ptag-dm">×1.0</span></div></div>
-                <div id="pb-jambe_g" class="part-btn" onclick="selectPart('jambe_g')"><span class="pname">Jambe g.</span><div class="ptags"><span class="ptag ptag-dc">DC+2</span><span class="ptag ptag-dm">×0.75</span></div></div>
-                <div id="pb-jambe_d" class="part-btn" onclick="selectPart('jambe_d')"><span class="pname">Jambe d.</span><div class="ptags"><span class="ptag ptag-dc">DC+2</span><span class="ptag ptag-dm">×0.75</span></div></div>
-              </div>
-            </div>
+          <div class="dicerow">
+            <div class="df"><label>Resultat d20</label><input id="inp-d20" type="number" min="1" max="20" placeholder="1-20" oninput="computeResult()"/></div>
+            <div class="df"><label>Degats (resultat des)</label><input id="inp-dmg" type="number" min="0" placeholder="ex: 6" oninput="computeResult()"/></div>
           </div>
-
-          <!-- Dice inputs -->
-          <div class="dice-row">
-            <div class="dice-field">
-              <label>Résultat d20</label>
-              <input id="rollD20" type="number" min="1" max="20" placeholder="1–20" oninput="computeResult()" />
-            </div>
-            <div class="dice-field">
-              <label>Dégâts (dés)</label>
-              <input id="rollDmg" type="number" min="0" placeholder="ex: 6" oninput="computeResult()" />
-            </div>
-          </div>
-
-          <div class="result-box" id="attackResult">
-            <span style="color:var(--dim)">Sélectionne attaquant → cible → partie → entre les dés</span>
-          </div>
-          <button class="btn btn-green btn-block" id="confirmBtn" onclick="confirmAttack()" disabled>
-            ⚔ CONFIRMER L'ATTAQUE
-          </button>
+          <div class="rbox" id="result-box"><span class="dim">Selectionne attaquant → cible → partie → entre les des</span></div>
+          <button class="btn btn-green btn-blk" id="confirm-btn" onclick="confirmAttack()" disabled>CONFIRMER L'ATTAQUE</button>
         </div>
-
-        <!-- Right: log -->
         <div class="card">
-          <div class="card-title">JOURNAL</div>
-          <div id="logListDM" class="log-list"><div class="empty">Aucune action</div></div>
-        </div>
-
-      </div>
-    </div>
-
-    <!-- LOG TAB -->
-    <div class="dm-panel" id="dmp-log">
-      <div class="card">
-        <div class="card-title">JOURNAL COMPLET</div>
-        <div id="logListDM2" class="log-list" style="max-height:none"></div>
-      </div>
-    </div>
-
-    <!-- CHAT TAB -->
-    <div class="dm-panel" id="dmp-chat">
-      <div class="card">
-        <div class="card-title">CHAT DE SESSION</div>
-        <div id="chatMsgsDM" class="chat-msgs"></div>
-        <div class="chat-input-row">
-          <input id="chatInputDM" placeholder="Message..." onkeydown="chatKeydown(event,true)" />
-          <button class="btn btn-gold btn-sm" onclick="sendChat(true)">ENVOYER</button>
+          <div class="ctitle">JOURNAL — TOUR <span class="turn-num">1</span></div>
+          <div id="log-dm" class="llist"></div>
         </div>
       </div>
     </div>
 
+    <!-- LOG -->
+    <div class="dpnl" id="dp-log">
+      <div class="card">
+        <div class="ctitle">JOURNAL COMPLET</div>
+        <div id="log-dm" class="llist" style="max-height:none"></div>
+      </div>
+    </div>
+
+    <!-- INITIATIVE -->
+    <div class="dpnl" id="dp-init">
+      <div class="card"><div class="ctitle">ORDRE D'INITIATIVE</div><div id="init-dm"></div></div>
+    </div>
+
+  </div>
+
+  <div id="chat-float">
+    <div id="chat-hdr" onclick="toggleChat()">
+      <div id="chat-htitle">CHAT SESSION <span id="chat-badge">!</span></div>
+      <button id="chat-tog">▼</button>
+    </div>
+    <div id="chat-body">
+      <div id="chat-dm"></div>
+      <div class="cinprow"><input id="ci-dm" placeholder="Message..." onkeydown="chatKey(event)"/><button onclick="sendChat()">↑</button></div>
+    </div>
   </div>
 </div>
 
-<!-- ═══════════════ PLAYER SCREEN ═══════════════ -->
+<!-- PLAYER SCREEN -->
 <div id="screen-player" class="screen">
-  <div class="app-header">
+  <div class="hdr">
     <div>
-      <div class="hdr-title">◈ AETHON</div>
-      <div class="hdr-sub" id="playerNameBadge">JOUEUR</div>
+      <div class="hdrtitle">AETHON — <span class="my-name">JOUEUR</span></div>
+      <div class="hdrsub session-id">SESSION —</div>
     </div>
-    <div class="turn-badge turn-num">1</div>
-    <div class="hdr-meta" id="playerSessionBadge">SESSION —</div>
+    <div class="hdrturn turn-num">1</div>
+    <div class="hdracts">
+      <button class="btn btn-sm btn-red" onclick="quitCombat()">QUITTER COMBAT</button>
+    </div>
   </div>
-
-  <div class="tab-bar">
-    <button class="tab-btn pl-tab active" id="plt-combat" onclick="showPlayerTab('combat')">COMBAT</button>
-    <button class="tab-btn pl-tab"        id="plt-init"   onclick="showPlayerTab('init')">INITIATIVE</button>
-    <button class="tab-btn pl-tab"        id="plt-log"    onclick="showPlayerTab('log')">JOURNAL</button>
-    <button class="tab-btn pl-tab"        id="plt-chat"   onclick="showPlayerTab('chat')">CHAT</button>
+  <div class="tabbar">
+    <button class="tbtn ptab active" id="pt-lobby"  onclick="showPlayerTab('lobby')">MON PERSO</button>
+    <button class="tbtn ptab"        id="pt-combat" onclick="showPlayerTab('combat')">COMBAT</button>
+    <button class="tbtn ptab"        id="pt-init"   onclick="showPlayerTab('init')">INITIATIVE</button>
+    <button class="tbtn ptab"        id="pt-log"    onclick="showPlayerTab('log')">JOURNAL</button>
   </div>
+  <div class="abody">
 
-  <div class="app-body">
+    <!-- MON PERSO -->
+    <div class="ppnl active" id="pp-lobby">
+      <div class="lobbyhero">
+        <div class="lobbytitle">MON PERSONNAGE</div>
+        <div class="lobbysub">Tes stats — uniquement visibles par toi et le DM</div>
+      </div>
+      <div class="card" style="max-width:460px;margin:0 auto">
+        <div class="ctitle">MES STATISTIQUES DE COMBAT</div>
+        <div class="charform">
+          <div class="f"><label>Classe / Role</label><input id="p-class" placeholder="Guerrier, Rodeur..."/></div>
+          <div class="f"><label>Classe d'armure (CA)</label><input id="p-ca" type="number" value="12"/></div>
+          <div class="f"><label>Points de vie max</label><input id="p-pv" type="number" value="20"/></div>
+          <div class="f"><label>Bonus d'initiative</label><input id="p-init" type="number" value="0"/></div>
+        </div>
+        <button class="btn btn-gold btn-blk" onclick="saveMyChar()">SAUVEGARDER MON PERSONNAGE</button>
+        <div id="saved-badge">✓ PERSONNAGE PRET — EN ATTENTE DU COMBAT</div>
+      </div>
+    </div>
 
-    <!-- COMBAT TAB (player) -->
-    <div class="pl-panel active" id="plp-combat">
-      <div class="combat-grid">
-
-        <!-- Left: combatants (limited info) -->
+    <!-- COMBAT PLAYER -->
+    <div class="ppnl" id="pp-combat">
+      <div class="cgrid">
         <div>
           <div class="card">
-            <div class="card-title">COMBATTANTS</div>
-            <div style="font-size:9px;color:var(--dim);margin-bottom:8px">
-              Les PV/CA ennemis sont cachés — rôleplay !
-            </div>
-            <div id="combatListPlayer"></div>
+            <div class="ctitle">COMBATTANTS</div>
+            <div style="font-size:8px;color:var(--dim);margin-bottom:7px">PV/CA ennemis caches</div>
+            <div id="comb-player"></div>
           </div>
         </div>
-
-        <!-- Center: same attack panel -->
         <div class="card">
-          <div class="card-title">C'EST MON TOUR — ATTAQUE</div>
-          <div class="sel-row">
-            <div class="sel-box atk-box">
-              <div class="sel-label">ATTAQUANT</div>
-              <div class="sel-val" id="atkLabelP">— Aucun —</div>
+          <div class="ctitle">MON ATTAQUE</div>
+          <div class="selrow">
+            <div class="selbox ab"><div class="sellbl">ATTAQUANT</div><div class="selval" id="atklbl-p">- Aucun -</div></div>
+            <div class="selbox tb"><div class="sellbl">CIBLE</div><div class="selval" id="tgtlbl-p">- Aucun -</div></div>
+          </div>
+          <div class="vatswrap">
+            <div class="bodycol">
+              <svg class="bsvg" viewBox="0 0 80 200">
+                <ellipse id="sv-tete"    class="svgp critp" cx="40" cy="18" rx="14" ry="16" onclick="selPart2('tete')"/>
+                <rect    id="sv-cou"     class="svgp critp" x="33" y="33" width="14" height="10" rx="3" onclick="selPart2('cou')"/>
+                <rect    id="sv-torse"   class="svgp"       x="22" y="43" width="36" height="50" rx="4" onclick="selPart2('torse')"/>
+                <rect    id="sv-bras_g"  class="svgp"       x="6"  y="45" width="14" height="45" rx="5" onclick="selPart2('bras_g')"/>
+                <rect    id="sv-bras_d"  class="svgp"       x="60" y="45" width="14" height="45" rx="5" onclick="selPart2('bras_d')"/>
+                <rect    id="sv-bassin"  class="svgp"       x="25" y="93" width="30" height="18" rx="3" onclick="selPart2('bassin')"/>
+                <rect    id="sv-jambe_g" class="svgp"       x="22" y="111" width="16" height="60" rx="5" onclick="selPart2('jambe_g')"/>
+                <rect    id="sv-jambe_d" class="svgp"       x="42" y="111" width="16" height="60" rx="5" onclick="selPart2('jambe_d')"/>
+                <text x="40" y="21" text-anchor="middle" fill="rgba(197,151,58,.55)" font-size="6" font-family="Share Tech Mono">TETE</text>
+                <text x="40" y="70" text-anchor="middle" fill="rgba(197,151,58,.55)" font-size="6" font-family="Share Tech Mono">TORSE</text>
+              </svg>
             </div>
-            <div class="sel-box tgt-box">
-              <div class="sel-label">CIBLE</div>
-              <div class="sel-val" id="tgtLabelP">— Aucun —</div>
+            <div class="partscol">
+              <div id="pb-tete"    class="pbtn" onclick="selPart2('tete')">   <span class="pname">Tete</span>       <div class="ptags2"><span class="pt ptdc">DC+4</span><span class="pt ptdm">x1.5</span></div></div>
+              <div id="pb-cou"     class="pbtn" onclick="selPart2('cou')">    <span class="pname">Cou</span>        <div class="ptags2"><span class="pt ptdc">DC+6</span><span class="pt ptdm">x2.0</span></div></div>
+              <div id="pb-torse"   class="pbtn" onclick="selPart2('torse')">  <span class="pname">Torse</span>     <div class="ptags2"><span class="pt ptdc">DC+0</span><span class="pt ptdm">x1.0</span></div></div>
+              <div id="pb-bras_g"  class="pbtn" onclick="selPart2('bras_g')"> <span class="pname">Bras gauche</span><div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-bras_d"  class="pbtn" onclick="selPart2('bras_d')"> <span class="pname">Bras droit</span> <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-bassin"  class="pbtn" onclick="selPart2('bassin')"> <span class="pname">Bassin</span>    <div class="ptags2"><span class="pt ptdc">DC+1</span><span class="pt ptdm">x1.0</span></div></div>
+              <div id="pb-jambe_g" class="pbtn" onclick="selPart2('jambe_g')"><span class="pname">Jambe g.</span>  <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
+              <div id="pb-jambe_d" class="pbtn" onclick="selPart2('jambe_d')"><span class="pname">Jambe d.</span>  <div class="ptags2"><span class="pt ptdc">DC+2</span><span class="pt ptdm">x0.75</span></div></div>
             </div>
           </div>
-
-          <div style="margin-bottom:14px">
-            <div style="font-size:9px;letter-spacing:2px;color:var(--dim);margin-bottom:8px">PARTIE DU CORPS</div>
-            <div class="vats-layout">
-              <div class="body-wrap">
-                <svg class="body-svg" viewBox="0 0 80 200">
-                  <ellipse id="sv-tete"    class="svg-part crit-part" cx="40" cy="18" rx="14" ry="16" onclick="selectPart('tete')"/>
-                  <rect    id="sv-cou"     class="svg-part crit-part" x="33" y="33" width="14" height="10" rx="3" onclick="selectPart('cou')"/>
-                  <rect    id="sv-torse"   class="svg-part"           x="22" y="43" width="36" height="50" rx="4" onclick="selectPart('torse')"/>
-                  <rect    id="sv-bras_g"  class="svg-part"           x="6"  y="45" width="14" height="45" rx="5" onclick="selectPart('bras_g')"/>
-                  <rect    id="sv-bras_d"  class="svg-part"           x="60" y="45" width="14" height="45" rx="5" onclick="selectPart('bras_d')"/>
-                  <rect    id="sv-bassin"  class="svg-part"           x="25" y="93" width="30" height="18" rx="3" onclick="selectPart('bassin')"/>
-                  <rect    id="sv-jambe_g" class="svg-part"           x="22" y="111" width="16" height="60" rx="5" onclick="selectPart('jambe_g')"/>
-                  <rect    id="sv-jambe_d" class="svg-part"           x="42" y="111" width="16" height="60" rx="5" onclick="selectPart('jambe_d')"/>
-                  <text x="40" y="21" text-anchor="middle" fill="rgba(197,151,58,.6)" font-size="7" font-family="Share Tech Mono">TÊTE</text>
-                  <text x="40" y="70" text-anchor="middle" fill="rgba(197,151,58,.6)" font-size="7" font-family="Share Tech Mono">TORSE</text>
-                </svg>
-              </div>
-              <div class="parts-list">
-                <div id="pb-tete"    class="part-btn" onclick="selectPart('tete')"><span class="pname">Tête</span><div class="ptags"><span class="ptag ptag-dc">DC+4</span><span class="ptag ptag-dm">×1.5</span></div></div>
-                <div id="pb-cou"     class="part-btn" onclick="selectPart('cou')"><span class="pname">Cou</span><div class="ptags"><span class="ptag ptag-dc">DC+6</span><span class="ptag ptag-dm">×2.0</span></div></div>
-                <div id="pb-torse"   class="part-btn" onclick="selectPart('torse')"><span class="pname">Torse</span><div class="ptags"><span class="ptag ptag-dc">DC+0</span><span class="ptag ptag-dm">×1.0</span></div></div>
-                <div id="pb-bras_g"  class="part-btn" onclick="selectPart('bras_g')"><span class="pname">Bras gauche</span><div class="ptags"><span class="ptag ptag-dc">DC+2</span><span class="ptag ptag-dm">×0.75</span></div></div>
-                <div id="pb-bras_d"  class="part-btn" onclick="selectPart('bras_d')"><span class="pname">Bras droit</span><div class="ptags"><span class="ptag ptag-dc">DC+2</span><span class="ptag ptag-dm">×0.75</span></div></div>
-                <div id="pb-bassin"  class="part-btn" onclick="selectPart('bassin')"><span class="pname">Bassin</span><div class="ptags"><span class="ptag ptag-dc">DC+1</span><span class="ptag ptag-dm">×1.0</span></div></div>
-                <div id="pb-jambe_g" class="part-btn" onclick="selectPart('jambe_g')"><span class="pname">Jambe g.</span><div class="ptags"><span class="ptag ptag-dc">DC+2</span><span class="ptag ptag-dm">×0.75</span></div></div>
-                <div id="pb-jambe_d" class="part-btn" onclick="selectPart('jambe_d')"><span class="pname">Jambe d.</span><div class="ptags"><span class="ptag ptag-dc">DC+2</span><span class="ptag ptag-dm">×0.75</span></div></div>
-              </div>
-            </div>
+          <div class="dicerow">
+            <div class="df"><label>Resultat d20</label><input id="inp-d20" type="number" min="1" max="20" placeholder="1-20" oninput="computeResult()"/></div>
+            <div class="df"><label>Degats (resultat des)</label><input id="inp-dmg" type="number" min="0" placeholder="ex: 6" oninput="computeResult()"/></div>
           </div>
-
-          <div class="dice-row">
-            <div class="dice-field">
-              <label>Résultat d20</label>
-              <input id="rollD20" type="number" min="1" max="20" placeholder="1–20" oninput="computeResult()" />
-            </div>
-            <div class="dice-field">
-              <label>Dégâts (dés)</label>
-              <input id="rollDmg" type="number" min="0" placeholder="ex: 6" oninput="computeResult()" />
-            </div>
-          </div>
-
-          <div class="result-box" id="attackResult">
-            <span style="color:var(--dim)">Sélectionne attaquant → cible → partie → entre les dés</span>
-          </div>
-          <button class="btn btn-green btn-block" id="confirmBtn" onclick="confirmAttack()" disabled>
-            ⚔ CONFIRMER L'ATTAQUE
-          </button>
+          <div class="rbox" id="result-box"><span class="dim">Selectionne attaquant → cible → partie → entre les des</span></div>
+          <button class="btn btn-green btn-blk" id="confirm-btn" onclick="confirmAttack()" disabled>CONFIRMER L'ATTAQUE</button>
         </div>
-
-        <!-- Right: log (limited) -->
         <div class="card">
-          <div class="card-title">JOURNAL</div>
-          <div id="logListPlayer" class="log-list"><div class="empty">Aucune action</div></div>
-        </div>
-
-      </div>
-    </div>
-
-    <!-- INITIATIVE TAB -->
-    <div class="pl-panel" id="plp-init">
-      <div class="card">
-        <div class="card-title">ORDRE D'INITIATIVE</div>
-        <div id="initListPlayer"></div>
-      </div>
-    </div>
-
-    <!-- LOG TAB (player) -->
-    <div class="pl-panel" id="plp-log">
-      <div class="card">
-        <div class="card-title">JOURNAL DE COMBAT</div>
-        <div id="logListPlayer2" class="log-list" style="max-height:none"></div>
-      </div>
-    </div>
-
-    <!-- CHAT TAB -->
-    <div class="pl-panel" id="plp-chat">
-      <div class="card">
-        <div class="card-title">CHAT DE SESSION</div>
-        <div id="chatMsgsP" class="chat-msgs"></div>
-        <div class="chat-input-row">
-          <input id="chatInputP" placeholder="Message..." onkeydown="chatKeydown(event,false)" />
-          <button class="btn btn-gold btn-sm" onclick="sendChat(false)">ENVOYER</button>
+          <div class="ctitle">JOURNAL</div>
+          <div id="log-player" class="llist"></div>
         </div>
       </div>
     </div>
 
+    <!-- INITIATIVE -->
+    <div class="ppnl" id="pp-init">
+      <div class="card"><div class="ctitle">ORDRE D'INITIATIVE</div><div id="init-player"></div></div>
+    </div>
+
+    <!-- LOG -->
+    <div class="ppnl" id="pp-log">
+      <div class="card"><div class="ctitle">JOURNAL DE COMBAT</div><div id="log-player" class="llist" style="max-height:none"></div></div>
+    </div>
+
+  </div>
+
+  <div id="chat-float">
+    <div id="chat-hdr" onclick="toggleChat()">
+      <div id="chat-htitle">CHAT SESSION <span id="chat-badge">!</span></div>
+      <button id="chat-tog">▼</button>
+    </div>
+    <div id="chat-body">
+      <div id="chat-p"></div>
+      <div class="cinprow"><input id="ci-p" placeholder="Message..." onkeydown="chatKey(event)"/><button onclick="sendChat()">↑</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- COMBAT POPUP -->
+<div id="combat-popup">
+  <div class="popbox">
+    <div class="poptitle">COMBAT LANCE !</div>
+    <div class="popsub">Le Game Master a demarre le combat.<br>Rejoins pour participer !</div>
+    <div class="popbtns">
+      <button class="btn btn-green" onclick="joinCombat()">REJOINDRE</button>
+      <button class="btn btn-gray btn-sm" onclick="document.getElementById('combat-popup').classList.remove('show')">Plus tard</button>
+    </div>
   </div>
 </div>
 
 <div id="toast"></div>
-
-<script type="module">
-// Patch: update session label + player badge after join
-const origJoin = window.joinAsRole;
-window.joinAsRole = async function(role) {
-  await origJoin(role);
-  const sid = document.getElementById('sessionCode').value.trim().toUpperCase();
-  const name = document.getElementById('playerName').value.trim();
-  const dmLabel = document.getElementById('dmSessionLabel');
-  if (dmLabel) dmLabel.textContent = `SESSION ${sid} · DM: ${name}`;
-  const plName = document.getElementById('playerNameBadge');
-  if (plName) plName.textContent = name;
-  const plSid = document.getElementById('playerSessionBadge');
-  if (plSid) plSid.textContent = `SESSION ${sid}`;
-};
-
-// Patch log rendering for player secondary log panels
-const origRenderLog = window.renderLog || (() => {});
-</script>
-
 </body>
 </html>
